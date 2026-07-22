@@ -27,11 +27,11 @@ fixtures, and guarded final activation.
 | BACKUP-001–002 | CLI creates a restrictive `.smcvault` using a confirmed terminal passphrase, a checksummed 256-bit generated key, or key bytes from an inherited FD. Server jobs support passphrase and display-once generated-key modes. Key material is absent from headers and durable job status. Phase 4 owns the browser interaction. |
 | BACKUP-003–005 | One SQLite read transaction exports namespaces, all secret versions, tombstones, principals/authenticators, services, credential verifiers, policy graph, portable vault-scoped keys, and audit history. Sessions, CSRF, idempotency, maintenance state, source root/KEKs, and raw credentials are excluded. Logical plaintext exists only in zeroizing bounded memory and is written to files only after archive encryption. |
 | BACKUP-006 | Public inspect parses only bounded framing. Full verify authenticates the wrapped DEK, every ordered frame, exact EOF, logical framing/counts, digest, and final manifest without opening or mutating a vault. The API and documentation do not claim source-origin authenticity. |
-| BACKUP-007–010 | Restore requires absent database/root paths, creates a fresh installation and recovery epoch, atomically imports into guarded staging, re-encrypts every protected envelope, validates graph/commitments/audit, appends the recovery event, and activates last. Preserved credentials authenticate; revoke mode invalidates them before activation. |
+| BACKUP-007–010 | Restore requires absent database/root paths, creates a fresh installation and recovery epoch, atomically imports into guarded staging, re-encrypts every protected envelope, validates graph/commitments/audit, freshly reopens the root provider and all wrapped keys while still non-ready, and activates as the final fallible step. Returned post-staging failures remove database/WAL/SHM/root files. Preserved credentials authenticate; revoke mode invalidates them before activation. |
 | BACKUP-011 | `--key-fd` reads at most 4,096 protected bytes from an inherited descriptor. Passphrases and recovery keys have no command-line value option. |
 | BACKUP-012 | The published [v1 format](../ai_context_documentation/PORTABLE_ARCHIVE_FORMAT_V1.md), committed fixture, property parser campaign, and negative tests cover hostile lengths/KDFs, wrong key, corruption, truncation, extension, reorder, duplicate, downgrade, and arbitrary complete input. |
 | BACKUP-013–014 / AUTHN-006 | Fresh-host restore and owner recovery are local CLI actions; no unauthenticated network restore or ownership route exists. Logical vault ID is preserved while installation ID and epoch change. Source-bound passkeys are revoked pending destination reenrollment. |
-| BACKUP-015 | Server artifacts use opaque UUID names, mode-0700 directory/mode-0600 files, 32-job quota, 15-minute expiry, explicit delete, and durable downloaded/status state. Pending/running work becomes failed/interrupted on process restart. |
+| BACKUP-015 | Server artifacts use opaque UUID names, a non-symlink same-owner mode-0700 directory, mode-0600 files, 32-job quota, 15-minute expiry, explicit delete, and durable downloaded/status state. Pending/running work becomes failed/interrupted on process restart. |
 | AUDIT-001–004 | Backup authorization, completed creation, and restoration are chained events. Imported audit history verifies under the portably reprotected audit key; the new restore event uses the destination installation and incremented epoch. |
 | SEC-001–003 | Strict all-feature formatting, lint, tests, docs, RustSec, source/license policy, secret scanning, and link checks pass. The Phase 3 adversarial review closed both high findings. |
 | PERF-003 | Framing uses 16 KiB–4 MiB chunks, 32 MiB record bounds, 10 million record ceiling, 1 GiB application logical-stream ceiling, 8 GiB application file ceiling, and 64 GiB absolute framing ceiling. The 16 MiB/256 KiB multi-frame test completed in 5.16 s wall with a conservative whole-test-process peak RSS of 266,732 KiB in the debug harness. Phase 5 owns supported production limits. |
@@ -62,6 +62,11 @@ Focused evidence includes:
 - `interrupted_restore_cannot_be_activated_by_generic_startup`: durable guard,
   wrong activation version, generic-startup rejection, and persistent non-ready
   state.
+- `failed_post_staging_restore_removes_all_destination_files`: authenticated but
+  semantically invalid input reaches staging and fails without leaving its
+  database, WAL/SHM, or root provider.
+- `failed_backup_audit_never_publishes_or_leaves_a_partial`: injected audit
+  rejection leaves neither a final archive nor an opaque partial.
 - `wrong_key_corruption_truncation_and_extension_fail_closed` and
   `reordered_duplicate_and_downgraded_frames_fail_closed`: exact archive
   framing failures.

@@ -32,9 +32,13 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::{
     InitializedVault, VaultError, VaultOperationContext,
-    authentication::{authenticator_commitment, verify_principal_commitment},
+    authentication::{
+        authenticator_commitment, validate_password_phc, verify_principal_commitment,
+    },
     authorization::{policy_commitment, portable_authorization_commitment},
-    initialization::{PortableVaultKeys, initialize_restore_staging},
+    initialization::{
+        PortableVaultKeys, initialize_restore_staging, verify_restore_staging_reopen,
+    },
     service_identity::{
         application_credential_commitment, verify_application_credential_commitment,
     },
@@ -393,14 +397,18 @@ impl InitializedVault {
         let verified = match result {
             Ok(value) => value,
             Err(error) => {
-                let _cleanup = fs::remove_file(&temporary);
+                remove_file_and_sync_parent_best_effort(&temporary);
                 return Err(error);
             }
         };
-        fs::hard_link(&temporary, destination)?;
-        fs::remove_file(&temporary)?;
-        File::open(parent)?.sync_all()?;
-        let audit = self.build_audit(
+        let archive_bytes = match fs::metadata(&temporary) {
+            Ok(metadata) => metadata.len(),
+            Err(error) => {
+                remove_file_and_sync_parent_best_effort(&temporary);
+                return Err(error.into());
+            }
+        };
+        let audit = match self.build_audit(
             "backup:create",
             "archive",
             Some(ObjectId::from_uuid(verified.header.archive_id)),
@@ -411,14 +419,31 @@ impl InitializedVault {
                 credential_id: None,
                 now_unix_ms,
             },
-        )?;
+        ) {
+            Ok(audit) => audit,
+            Err(error) => {
+                remove_file_and_sync_parent_best_effort(&temporary);
+                return Err(error.into());
+            }
+        };
         if let Err(error) = self.store.append_audit(&audit) {
-            let _cleanup = fs::remove_file(destination);
+            remove_file_and_sync_parent_best_effort(&temporary);
             return Err(error.into());
         }
+        if let Err(error) = fs::hard_link(&temporary, destination) {
+            remove_file_and_sync_parent_best_effort(&temporary);
+            return Err(error.into());
+        }
+        let mut published_cleanup = PublishedBackupCleanup::new(destination);
+        if let Err(error) = fs::remove_file(&temporary) {
+            remove_file_and_sync_parent_best_effort(&temporary);
+            return Err(error.into());
+        }
+        File::open(parent)?.sync_all()?;
+        published_cleanup.disarm();
         Ok(BackupFileReport {
             archive_id: verified.header.archive_id,
-            archive_bytes: fs::metadata(destination)?.len(),
+            archive_bytes,
             record_count: verified.record_count,
             logical_bytes: verified.logical_bytes,
             destination: destination.to_path_buf(),
@@ -639,6 +664,7 @@ impl InitializedVault {
         if now_unix_ms < 0 || database_path.exists() || root_key_path.exists() {
             return Err(BackupError::InvalidInput);
         }
+        let mut destination_cleanup = RestoreDestinationCleanup::new(database_path, root_key_path);
         let (source_file, source_metadata) = open_safe_source(source)?;
         let mut canonical = Zeroizing::new(Vec::new());
         let verified = decode_archive(source_file, source_metadata.len(), key, |chunk| {
@@ -693,15 +719,19 @@ impl InitializedVault {
         )?;
         destination.store.append_audit(&audit)?;
         destination.verify_restored_snapshot(&snapshot)?;
+        verify_restore_staging_reopen(
+            database_path,
+            root_key_path,
+            destination.vault_id,
+            destination.installation_id,
+        )
+        .map_err(|_| BackupError::Integrity)?;
         destination.store.activate_restored_initialization(1)?;
-
-        let reopened = crate::initialize_vault(database_path, root_key_path, now_unix_ms)
-            .map_err(|_| BackupError::Integrity)?;
-        let _audit_verification = reopened.verify_audit_chain()?;
+        destination_cleanup.disarm();
         Ok(RestoreReport {
             archive_id: verified.header.archive_id,
-            vault_id: reopened.vault_id,
-            installation_id: reopened.installation_id,
+            vault_id: destination.vault_id,
+            installation_id: destination.installation_id,
             recovery_epoch: destination_epoch,
             imported_records: verified.record_count,
             imported_audit_events,
@@ -844,6 +874,13 @@ impl InitializedVault {
         let mut authenticators = Vec::with_capacity(decoded.authenticators.len());
         for row in decoded.authenticators.drain(..) {
             let kind = parse_authenticator_kind(&row.kind)?;
+            if matches!(
+                kind,
+                AuthenticatorKind::Password | AuthenticatorKind::Recovery
+            ) {
+                validate_password_phc(row.password_phc.as_deref().ok_or(BackupError::Integrity)?)
+                    .map_err(|_| BackupError::Integrity)?;
+            }
             let mut restored = PortableAuthenticator {
                 authenticator_id: row.authenticator_id,
                 principal_id: row.principal_id,
@@ -1270,6 +1307,100 @@ impl InitializedVault {
 }
 
 #[cfg(unix)]
+struct RestoreDestinationCleanup {
+    database_path: PathBuf,
+    root_key_path: PathBuf,
+    armed: bool,
+}
+
+#[cfg(unix)]
+struct PublishedBackupCleanup {
+    path: PathBuf,
+    armed: bool,
+}
+
+#[cfg(unix)]
+impl PublishedBackupCleanup {
+    fn new(path: &Path) -> Self {
+        Self {
+            path: path.to_path_buf(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for PublishedBackupCleanup {
+    fn drop(&mut self) {
+        if self.armed {
+            remove_file_and_sync_parent_best_effort(&self.path);
+        }
+    }
+}
+
+#[cfg(unix)]
+impl RestoreDestinationCleanup {
+    fn new(database_path: &Path, root_key_path: &Path) -> Self {
+        Self {
+            database_path: database_path.to_path_buf(),
+            root_key_path: root_key_path.to_path_buf(),
+            armed: true,
+        }
+    }
+
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+#[cfg(unix)]
+impl Drop for RestoreDestinationCleanup {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut database_wal = self.database_path.as_os_str().to_os_string();
+        database_wal.push("-wal");
+        let mut database_shm = self.database_path.as_os_str().to_os_string();
+        database_shm.push("-shm");
+        for path in [
+            Path::new(&database_wal),
+            Path::new(&database_shm),
+            &self.database_path,
+            &self.root_key_path,
+        ] {
+            match fs::remove_file(path) {
+                Ok(()) => sync_parent_best_effort(path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => {}
+            }
+        }
+    }
+}
+
+#[cfg(unix)]
+fn sync_parent_best_effort(path: &Path) {
+    if let Some(parent) = path.parent()
+        && let Ok(directory) = File::open(parent)
+    {
+        let _sync = directory.sync_all();
+    }
+}
+
+#[cfg(unix)]
+fn remove_file_and_sync_parent_best_effort(path: &Path) {
+    match fs::remove_file(path) {
+        Ok(()) => sync_parent_best_effort(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(_) => {}
+    }
+}
+
+#[cfg(unix)]
 fn open_safe_source(source: &Path) -> Result<(File, fs::Metadata), BackupError> {
     let file = OpenOptions::new()
         .read(true)
@@ -1625,16 +1756,24 @@ impl From<&StoredAuditRecord> for LogicalAudit {
 mod tests {
     use std::{
         fs,
-        os::unix::fs::{DirBuilderExt, symlink},
+        io::Cursor,
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt, symlink},
     };
 
-    use smcv_backup::{ArchiveKey, RecoveryKey};
-    use smcv_core::{ProtectedBytes, ProtectedString, RequestId, VaultId};
+    use rusqlite::Connection;
+    use smcv_backup::{ArchiveKey, ArchiveMetadata, ArchiveOptions, RecoveryKey, write_archive};
+    use smcv_core::{
+        InstallationId, PrincipalId, ProtectedBytes, ProtectedString, RequestId, VaultId,
+    };
     use smcv_crypto::KeyMaterial;
     use smcv_storage::{ActivationState, StorageError};
     use tempfile::TempDir;
 
-    use super::{CredentialRestoreMode, InitializedVault};
+    use super::{
+        CredentialRestoreMode, InitializedVault, LogicalAuthorizationState, LogicalKeys,
+        LogicalPrincipal, RECORD_AUTHORIZATION_STATE, RECORD_KEYS, RECORD_PRINCIPAL, append_record,
+        encode_key,
+    };
     use crate::{
         LocalSetupCapability, MetadataInput, ServiceIdentityMetadata, VaultOperationContext,
         initialization::{PortableVaultKeys, initialize_restore_staging},
@@ -1957,6 +2096,124 @@ mod tests {
                 .activation_state,
             ActivationState::Initializing
         );
+        Ok(())
+    }
+
+    #[test]
+    fn failed_post_staging_restore_removes_all_destination_files()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let archive_directory = directory.path().join("archive");
+        make_directory(&archive_directory)?;
+        let archive_path = archive_directory.join("invalid.smcvault");
+        let recovery_key = RecoveryKey::generate()?;
+        let vault_id = VaultId::random();
+        let mut logical = Vec::new();
+        append_record(
+            &mut logical,
+            RECORD_KEYS,
+            &LogicalKeys {
+                blind_index: encode_key(&KeyMaterial::generate()?),
+                audit: encode_key(&KeyMaterial::generate()?),
+                token_verifier: encode_key(&KeyMaterial::generate()?),
+            },
+        )?;
+        append_record(
+            &mut logical,
+            RECORD_AUTHORIZATION_STATE,
+            &LogicalAuthorizationState {
+                revision: 1,
+                state_commitment: [0_u8; 32],
+            },
+        )?;
+        append_record(
+            &mut logical,
+            RECORD_PRINCIPAL,
+            &LogicalPrincipal {
+                principal_id: PrincipalId::random(),
+                kind: "owner".to_owned(),
+                state: "active".to_owned(),
+                revision: 1,
+                state_commitment: [0_u8; 32],
+                created_at_unix_ms: 1_800_000_300_000,
+                updated_at_unix_ms: 1_800_000_300_000,
+            },
+        )?;
+        let mut archive_file = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&archive_path)?;
+        write_archive(
+            Cursor::new(logical),
+            &mut archive_file,
+            ArchiveKey::Recovery(&recovery_key),
+            &ArchiveMetadata {
+                logical_vault_id: vault_id.as_uuid(),
+                source_installation_id: InstallationId::random().as_uuid(),
+                source_recovery_epoch: 0,
+                source_schema_version: super::SCHEMA_VERSION,
+                security_semantics_version: super::SECURITY_SEMANTICS_VERSION,
+                created_at_unix_ms: 1_800_000_300_000,
+            },
+            ArchiveOptions::default(),
+        )?;
+        archive_file.sync_all()?;
+        drop(archive_file);
+
+        let database = directory.path().join("destination/database/vault.sqlite");
+        let root = directory.path().join("destination/provider/root.key");
+        assert!(
+            InitializedVault::restore_backup_file(
+                &archive_path,
+                &database,
+                &root,
+                ArchiveKey::Recovery(&recovery_key),
+                CredentialRestoreMode::Preserve,
+                1_800_000_300_001,
+            )
+            .is_err()
+        );
+        assert!(!database.exists());
+        assert!(!root.exists());
+        assert!(!database.with_extension("sqlite-wal").exists());
+        assert!(!database.with_extension("sqlite-shm").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_backup_audit_never_publishes_or_leaves_a_partial()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = TempDir::new()?;
+        let database = directory.path().join("source/database/vault.sqlite");
+        let root = directory.path().join("source/provider/root.key");
+        let vault = initialize_vault(&database, &root, 1_800_000_400_000)?;
+        let injector = Connection::open(&database)?;
+        injector.execute_batch(
+            "CREATE TRIGGER smcv_test_reject_backup_audit
+             BEFORE INSERT ON smcv_audit_events
+             WHEN NEW.action = 'backup:create'
+             BEGIN
+                 SELECT RAISE(ABORT, 'synthetic audit failure');
+             END;",
+        )?;
+        drop(injector);
+        let backup_directory = directory.path().join("backups");
+        make_directory(&backup_directory)?;
+        let destination = backup_directory.join("must-not-exist.smcvault");
+        let recovery_key = RecoveryKey::generate()?;
+
+        assert!(
+            vault
+                .create_backup_file(
+                    &destination,
+                    ArchiveKey::Recovery(&recovery_key),
+                    1_800_000_400_001,
+                )
+                .is_err()
+        );
+        assert!(!destination.exists());
+        assert_eq!(fs::read_dir(&backup_directory)?.count(), 0);
         Ok(())
     }
 }

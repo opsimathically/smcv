@@ -175,22 +175,75 @@ impl SqliteStore {
     /// completed.
     pub fn backup_to(&self, destination: impl AsRef<Path>) -> StorageResult<()> {
         let destination = destination.as_ref();
-        create_restrictive_file(destination, true)?;
-
-        let source = self.lock()?;
-        let mut target = Connection::open_with_flags(
-            destination,
-            OpenFlags::SQLITE_OPEN_READ_WRITE
-                | OpenFlags::SQLITE_OPEN_FULL_MUTEX
-                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )?;
-        let backup = Backup::new(&source, &mut target)?;
-        backup.run_to_completion(32, Duration::from_millis(10), None)?;
+        if destination.exists() {
+            return Err(StorageError::DestinationExists);
+        }
+        let parent = destination.parent().ok_or(StorageError::UnsafePath)?;
+        let temporary = parent.join(format!(".smcv-snapshot-{}.partial", uuid::Uuid::new_v4()));
+        let cleanup = PartialSnapshotCleanup(&temporary);
+        create_restrictive_file(&temporary, true)?;
+        {
+            let source = self.lock()?;
+            let mut target = Connection::open_with_flags(
+                &temporary,
+                OpenFlags::SQLITE_OPEN_READ_WRITE
+                    | OpenFlags::SQLITE_OPEN_FULL_MUTEX
+                    | OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )?;
+            let backup = Backup::new(&source, &mut target)?;
+            backup.run_to_completion(32, Duration::from_millis(10), None)?;
+        }
+        fs::File::open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(io_as_storage)?;
+        fs::hard_link(&temporary, destination).map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                StorageError::DestinationExists
+            } else {
+                io_as_storage(error)
+            }
+        })?;
+        let mut destination_cleanup = PublishedSnapshotCleanup {
+            path: destination,
+            armed: true,
+        };
+        fs::remove_file(&temporary).map_err(io_as_storage)?;
+        fs::File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(io_as_storage)?;
+        destination_cleanup.armed = false;
+        drop(cleanup);
         Ok(())
     }
 
     fn lock(&self) -> StorageResult<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| StorageError::Poisoned)
+    }
+}
+
+struct PartialSnapshotCleanup<'a>(&'a Path);
+
+impl Drop for PartialSnapshotCleanup<'_> {
+    fn drop(&mut self) {
+        let _cleanup = fs::remove_file(self.0);
+    }
+}
+
+struct PublishedSnapshotCleanup<'a> {
+    path: &'a Path,
+    armed: bool,
+}
+
+impl Drop for PublishedSnapshotCleanup<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            let _cleanup = fs::remove_file(self.path);
+            if let Some(parent) = self.path.parent()
+                && let Ok(directory) = fs::File::open(parent)
+            {
+                let _sync = directory.sync_all();
+            }
+        }
     }
 }
 
@@ -1036,6 +1089,15 @@ mod tests {
             store.backup_to(&backup_path),
             Err(StorageError::DestinationExists)
         ));
+        assert!(
+            std::fs::read_dir(directory.path())
+                .unwrap_or_else(|error| panic!("snapshot directory must read: {error}"))
+                .filter_map(Result::ok)
+                .all(|entry| !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".smcv-snapshot-"))
+        );
     }
 
     #[test]

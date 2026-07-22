@@ -132,6 +132,10 @@ write required audit state.
 - Manual UI and CLI backup are supported.
 - Scheduled CLI backup supports a protected non-interactive key source.
 - A completed backup is immediately verified before success is reported.
+- Portable archives and local SQLite snapshots publish from restrictive
+  same-directory partial files without overwrite and sync the directory before
+  success. Required backup audit state commits before the portable final name
+  becomes visible.
 - Retention never deletes the final known-good verified copy.
 - Server-generated encrypted download artifacts use opaque names, quotas,
   restrictive permissions, and short expiry; their presence is not described as
@@ -139,6 +143,11 @@ write required audit state.
 - Failed restore staging directories and orphaned destination key material are
   recognized by explicit non-ready state and cleaned only after target identity
   validation.
+- A returned restore error removes files created by that attempt. Successful
+  restore freshly reloads the external root provider and all wrapped keys while
+  still guarded/non-ready, then commits readiness as the final fallible step.
+- Backup artifact registries reject a symlinked, permissive, or foreign-owned
+  custody directory.
 - Off-host movement and destination access are operator responsibilities with
   documented examples.
 - Recovery keys are stored separately from backup files.

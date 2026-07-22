@@ -607,10 +607,28 @@ fn verify_password_record(
         .password_phc
         .as_deref()
         .ok_or(AuthenticationError::Integrity)?;
+    validate_password_phc(phc)?;
     let parsed = PasswordHash::new(phc).map_err(|_| AuthenticationError::Integrity)?;
     Ok(argon2()?
         .verify_password(password.expose().as_bytes(), &parsed)
         .is_ok())
+}
+
+pub(crate) fn validate_password_phc(phc: &str) -> Result<(), AuthenticationError> {
+    let parsed = PasswordHash::new(phc).map_err(|_| AuthenticationError::Integrity)?;
+    let params = Params::try_from(&parsed).map_err(|_| AuthenticationError::Integrity)?;
+    if parsed.algorithm.as_str() != "argon2id"
+        || parsed.version != Some(19)
+        || params.m_cost() != 64 * 1_024
+        || params.t_cost() != 3
+        || params.p_cost() != 1
+        || params.output_len() != Some(32)
+        || parsed.salt.is_none()
+        || parsed.hash.as_ref().is_none_or(|output| output.len() != 32)
+    {
+        return Err(AuthenticationError::Integrity);
+    }
+    Ok(())
 }
 
 pub(crate) fn principal_commitment(
@@ -799,6 +817,8 @@ mod tests {
 
     use crate::{LocalSetupCapability, RequestPrincipal, initialize_vault};
 
+    use super::validate_password_phc;
+
     fn fixture() -> (TempDir, crate::InitializedVault) {
         let root = TempDir::new()
             .unwrap_or_else(|error| panic!("synthetic directory must create: {error}"));
@@ -837,6 +857,32 @@ mod tests {
             .next()
             .unwrap_or_else(|| panic!("synthetic authenticator must exist"));
         (owner, authenticator)
+    }
+
+    #[test]
+    fn password_phc_work_parameters_are_exactly_bounded_before_verification() {
+        let (_root, vault) = fixture();
+        let password = ProtectedString::new(String::from("synthetic long password"));
+        vault
+            .enroll_local_owner(
+                LocalSetupCapability::for_local_cli(),
+                &password,
+                RequestId::random(),
+                1_800_000_000_001,
+            )
+            .unwrap_or_else(|error| panic!("synthetic owner must enroll: {error}"));
+        let (_, authenticator) = owner_and_password_authenticator(&vault);
+        let phc = authenticator
+            .password_phc
+            .as_deref()
+            .unwrap_or_else(|| panic!("password PHC must exist"));
+        validate_password_phc(phc)
+            .unwrap_or_else(|error| panic!("generated PHC must validate: {error}"));
+
+        let excessive = phc.replace("m=65536", "m=4294967295");
+        assert!(validate_password_phc(&excessive).is_err());
+        let excessive_iterations = phc.replace("t=3", "t=4294967295");
+        assert!(validate_password_phc(&excessive_iterations).is_err());
     }
 
     #[test]

@@ -349,6 +349,76 @@ pub(crate) fn initialize_restore_staging(
     })
 }
 
+/// Reopens a guarded restore destination without making it ready. This proves
+/// that the external root provider and every wrapped vault key can be loaded by
+/// a fresh connection before the caller commits the activation marker.
+#[cfg(unix)]
+pub(crate) fn verify_restore_staging_reopen(
+    database_path: &Path,
+    root_key_path: &Path,
+    expected_vault_id: VaultId,
+    expected_installation_id: InstallationId,
+) -> Result<(), InitializationError> {
+    prepare_parent(database_path)?;
+    prepare_parent(root_key_path)?;
+    ensure_separate_parents(database_path, root_key_path)?;
+
+    let store = SqliteStore::open(database_path)?;
+    let installation = store.installation()?.ok_or(StorageError::NotInitialized)?;
+    if installation.activation_state != ActivationState::Initializing
+        || installation.vault_id != expected_vault_id
+        || installation.installation_id != expected_installation_id
+        || installation.active_kek_version.is_some()
+    {
+        return Err(StorageError::StateConflict.into());
+    }
+    let root = load_root_key_file(root_key_path)?;
+    if root.vault_id != expected_vault_id || root.installation_id != expected_installation_id {
+        return Err(StorageError::StateConflict.into());
+    }
+
+    let registered_keks = store.registered_keys(KeyKind::KeyEncryption)?;
+    validate_kek_registry_state(&store, &installation, &registered_keks)?;
+    let registered_kek = registered_keks
+        .into_iter()
+        .find(|key| key.state == KeyState::Active && key.wrapped.version == 1)
+        .ok_or(StorageError::StateConflict)?;
+    let kek = unwrap_key(
+        &root.key,
+        expected_vault_id,
+        expected_installation_id,
+        ObjectKind::WrappedKeyEncryptionKey,
+        &registered_kek.wrapped,
+    )?;
+    let mut key_encryption_keys = BTreeMap::new();
+    key_encryption_keys.insert(1, kek);
+    let _blind_index = unwrap_registry_key(
+        &store,
+        &key_encryption_keys,
+        expected_vault_id,
+        expected_installation_id,
+        KeyKind::BlindIndex,
+        ObjectKind::BlindIndexKey,
+    )?;
+    let _audit = unwrap_registry_key(
+        &store,
+        &key_encryption_keys,
+        expected_vault_id,
+        expected_installation_id,
+        KeyKind::Audit,
+        ObjectKind::AuditKey,
+    )?;
+    let _token_verifier = unwrap_registry_key(
+        &store,
+        &key_encryption_keys,
+        expected_vault_id,
+        expected_installation_id,
+        KeyKind::TokenVerifier,
+        ObjectKind::VerifierKey,
+    )?;
+    Ok(())
+}
+
 fn validate_kek_registry_state(
     store: &SqliteStore,
     installation: &InstallationRecord,

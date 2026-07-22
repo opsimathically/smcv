@@ -121,3 +121,24 @@ Validation includes the expanded storage suite, frozen migration fixture,
 foreign-database byte comparison, unknown/inconsistent-version rejection,
 deterministic audit concurrency ordering, strict all-feature Clippy, and the
 full repository gate. No Pass 5 critical/high finding remains open.
+
+## Pass 6 — backup, import, restore, and recovery custody
+
+Perspective: a crash at every publication/activation edge, a malicious archive
+holder controlling authenticated logical fields, a local path replacer, and an
+operator relying on retryable recovery. Result: **five findings repaired and
+retested**.
+
+| ID | Severity | Finding | Repair and verification |
+|---|---|---|---|
+| A10-R6-001 | Critical | Restore committed the ready marker and only then performed its fresh reopen/audit check. A failure there returned an error while leaving a ready destination; failures after staging also stranded database and root-provider files that blocked a clean retry. | Restore now completes protected-state verification, then freshly reopens the still-guarded database, reloads the external root provider, and unwraps every required key before activation. Activation is the final fallible step. An attempt-owned cleanup guard removes database, WAL/SHM, and root-provider files on every ordinary post-staging error. A deliberately authenticated but invalid logical archive proves cleanup. |
+| A10-R6-002 | High | Imported password/recovery PHC strings were commitment-authenticated but their Argon2 parameters were not bounded. An archive/key holder could create a valid archive whose later login requested extreme memory or iteration work. | Password verification and restore transformation now structurally require the exact supported Argon2id v1.3 profile, output length, and required fields before invoking the KDF. Regressions reject maximum-width memory and iteration values without performing their work. |
+| A10-R6-003 | High | Portable backup exposed the final archive name before its required audit append. Audit rejection attempted best-effort deletion, so a failed call could leave an untracked final artifact; build-audit failure also leaked the encrypted partial. | The fully verified archive remains under its random partial name until the chained backup event commits. Publication then uses no-overwrite hard-link semantics and a directory sync; guarded cleanup removes partial/final paths on every reported failure. An injected audit trigger proves neither name remains. |
+| A10-R6-004 | Medium | The SQLite operational snapshot API wrote directly to the final path and returned without explicit file/directory durability. A crash or backup error could leave a partial file that looked complete. | Snapshots now write through a restrictive random same-directory partial using `SQLITE_OPEN_NOFOLLOW`, sync the complete inode, publish without overwrite, remove the partial, and sync the directory. Tests prove readability, no-overwrite behavior, mode, and absence of residual partial names. |
+| A10-R6-005 | Medium | The server backup-artifact registry followed an existing final directory symlink and checked only its target mode, weakening the documented custody boundary. | Registry open now uses symlink metadata and requires a real mode-0700 directory owned by the effective service user. A regression rejects a symlink to an otherwise restrictive directory. |
+
+Validation includes clean-host preserve/revoke restore, the committed v1 fixture
+and second restore, injected post-staging/audit failures, exact PHC work-factor
+bounds, snapshot publication, artifact-custody symlink rejection, strict
+all-feature Clippy, and focused application/storage/server suites. No Pass 6
+critical/high finding remains open.

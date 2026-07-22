@@ -7,7 +7,7 @@ use std::{
 };
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 
 use axum::{
     Json, RequestExt as _,
@@ -88,14 +88,22 @@ impl Drop for RemoveFileOnDrop {
 impl BackupJobRegistry {
     #[cfg(unix)]
     pub(super) fn open(directory: &Path) -> Result<Self, std::io::Error> {
-        if !directory.exists() {
-            fs::DirBuilder::new()
-                .recursive(true)
-                .mode(0o700)
-                .create(directory)?;
+        match directory.symlink_metadata() {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                fs::DirBuilder::new()
+                    .recursive(true)
+                    .mode(0o700)
+                    .create(directory)?;
+            }
+            Err(error) => return Err(error),
         }
-        let metadata = directory.metadata()?;
-        if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+        let metadata = directory.symlink_metadata()?;
+        if !metadata.is_dir()
+            || metadata.file_type().is_symlink()
+            || metadata.permissions().mode() & 0o077 != 0
+            || metadata.uid() != current_effective_uid()?
+        {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::PermissionDenied,
                 "backup artifact directory is not restrictive",
@@ -267,6 +275,17 @@ impl BackupJobRegistry {
     fn status_path(&self, job_id: Uuid) -> PathBuf {
         self.directory.join(format!("{job_id}.json"))
     }
+}
+
+#[cfg(unix)]
+fn current_effective_uid() -> Result<u32, std::io::Error> {
+    let status = fs::read_to_string("/proc/self/status")?;
+    status
+        .lines()
+        .find_map(|line| line.strip_prefix("Uid:"))
+        .and_then(|values| values.split_whitespace().nth(1))
+        .and_then(|value| value.parse().ok())
+        .ok_or_else(|| std::io::Error::other("effective user identity is unavailable"))
 }
 
 enum OwnedArchiveKey {
@@ -775,7 +794,10 @@ fn remove_if_exists(path: &Path) -> Result<(), std::io::Error> {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+    };
 
     use tempfile::TempDir;
 
@@ -805,6 +827,18 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("recovered job missing"))?;
         assert_eq!(recovered.state, JobState::Failed);
         assert_eq!(recovered.error_code.as_deref(), Some("interrupted"));
+        Ok(())
+    }
+
+    #[test]
+    fn artifact_registry_rejects_a_symlinked_custody_directory() -> Result<(), std::io::Error> {
+        let root = TempDir::new()?;
+        let actual = root.path().join("actual");
+        fs::create_dir(&actual)?;
+        fs::set_permissions(&actual, fs::Permissions::from_mode(0o700))?;
+        let linked = root.path().join("linked");
+        symlink(&actual, &linked)?;
+        assert!(BackupJobRegistry::open(&linked).is_err());
         Ok(())
     }
 }

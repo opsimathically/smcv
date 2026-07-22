@@ -153,8 +153,12 @@ supports retention without deleting the last known-good backup.
    write.
 6. Finalize and authenticate the manifest and stream commitment.
 7. Reopen and verify the completed archive with the supplied key.
-8. Atomically rename to the chosen `.smcvault` destination where supported.
-9. Audit result and return safe archive ID, size, format, creation time, and
+8. Commit the chained authorization/result event while the verified archive
+   still has only its opaque partial name.
+9. Publish without overwrite to the chosen `.smcvault` destination and sync the
+   containing directory. Any audit or publication failure removes the partial;
+   a final name is never exposed before required audit state commits.
+10. Return safe archive ID, size, format, creation time, and
    counts.
 
 Failure removes or clearly marks only the incomplete encrypted temporary file.
@@ -213,14 +217,20 @@ external anchor.
    valid for the destination.
 9. Produce a safe restore report and require final confirmation where the UI
    workflow has not already committed intent.
-10. Verify a fresh unlock, then commit the installation activation marker last.
-    A failed restore leaves no ready partial vault. Orphaned staging keys/files
-    are securely identified for cleanup without affecting another vault.
+10. Reopen the guarded non-ready destination through a new database connection,
+    reload the external root provider, and unwrap every required key. Commit the
+    installation activation marker only after that fresh-unlock proof; no
+    fallible verification follows activation. An ordinary returned failure
+    removes the newly created database, WAL/SHM, and root-provider files. A
+    process crash may leave an explicitly non-ready guarded destination for
+    identity-checked cleanup, but never a generically activatable partial vault.
 11. Begin a new installation/recovery-epoch audit segment that references but
     does not rewrite imported history.
 
 Import never trusts archive-supplied KDF values, paths, allocation sizes,
 timestamps, IDs, or counts before bounds and structural validation.
+Imported password and recovery-verifier PHC strings must use the exact supported
+Argon2id profile before any password verification can allocate KDF memory.
 
 ## Rollback awareness
 
