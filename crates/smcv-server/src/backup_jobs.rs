@@ -1,7 +1,7 @@
 use std::{
     collections::HashMap,
     fs::{self, File, OpenOptions},
-    io::{BufReader, Write},
+    io::{BufReader, Read, Seek, Write},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -13,19 +13,22 @@ use axum::{
     Json, RequestExt as _,
     body::Body,
     extract::{Multipart, Path as AxumPath, State},
-    http::{HeaderMap, HeaderValue, Request, StatusCode, header},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::Response,
 };
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 use smcv_app::{CredentialRestoreMode, InitializedVault, RequestPrincipal};
 use smcv_backup::{ArchiveKey, KeyMode, RecoveryKey};
 use tokio::io::AsyncWriteExt as _;
-use tower::ServiceExt as _;
-use tower_http::services::ServeFile;
+use tokio_util::io::ReaderStream;
 use uuid::Uuid;
 use zeroize::{Zeroize, Zeroizing};
 
-use super::{ApiError, ApiState, authenticate_owner, map_vault_error, now_unix_ms, request_id};
+use super::{
+    ApiError, ApiState, apply_security_headers, authenticate_owner, map_vault_error, now_unix_ms,
+    request_id,
+};
 
 const MAX_JOBS: usize = 32;
 const JOB_TTL_MS: i64 = 15 * 60 * 1_000;
@@ -56,6 +59,8 @@ struct BackupJobRecord {
     #[serde(default)]
     source_recovery_epoch: Option<u64>,
     archive_bytes: Option<u64>,
+    #[serde(default)]
+    artifact_sha256: Option<String>,
     record_count: Option<u64>,
     #[serde(default, alias = "downloaded")]
     download_started: bool,
@@ -171,6 +176,22 @@ impl BackupJobRegistry {
                 remove_if_exists(&self.artifact_path(record.job_id))?;
                 self.persist(&record)?;
             }
+            if record.state == JobState::Completed
+                && !completed_artifact_metadata_is_valid(
+                    &record,
+                    &self.artifact_path(record.job_id),
+                )
+            {
+                record.state = JobState::Failed;
+                record.error_code = Some("artifact_integrity_failed".to_owned());
+                record.updated_at_unix_ms = record.updated_at_unix_ms.max(now);
+                record.expires_at_unix_ms = record
+                    .updated_at_unix_ms
+                    .saturating_add(JOB_TTL_MS)
+                    .max(record.created_at_unix_ms.saturating_add(1));
+                remove_if_exists(&self.artifact_path(record.job_id))?;
+                self.persist(&record)?;
+            }
             if loaded.len() >= MAX_JOBS {
                 return Err(std::io::Error::other("backup job quota exceeded on disk"));
             }
@@ -220,6 +241,7 @@ impl BackupJobRegistry {
             logical_vault_id: None,
             source_recovery_epoch: None,
             archive_bytes: None,
+            artifact_sha256: None,
             record_count: None,
             download_started: false,
             error_code: None,
@@ -338,6 +360,73 @@ fn current_effective_uid() -> Result<u32, std::io::Error> {
         .ok_or_else(|| std::io::Error::other("effective user identity is unavailable"))
 }
 
+#[cfg(unix)]
+fn open_restrictive_artifact(path: &Path, expected_bytes: u64) -> Result<File, std::io::Error> {
+    let file = OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        .open(path)?;
+    let metadata = file.metadata()?;
+    if !metadata.is_file()
+        || metadata.permissions().mode() & 0o077 != 0
+        || metadata.uid() != current_effective_uid()?
+        || metadata.len() != expected_bytes
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "backup artifact custody metadata is invalid",
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(unix)]
+fn open_and_digest_artifact(
+    path: &Path,
+    expected_bytes: u64,
+    expected_sha256: Option<&str>,
+) -> Result<(File, String), std::io::Error> {
+    let mut file = open_restrictive_artifact(path, expected_bytes)?;
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0_u8; 64 * 1024].into_boxed_slice();
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    file.rewind()?;
+    let actual = hex::encode(digest.finalize());
+    if expected_sha256.is_some_and(|expected| expected != actual) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "backup artifact digest does not match durable status",
+        ));
+    }
+    Ok((file, actual))
+}
+
+#[cfg(unix)]
+fn completed_artifact_metadata_is_valid(record: &BackupJobRecord, path: &Path) -> bool {
+    let Some(expected_bytes) = record.archive_bytes else {
+        return false;
+    };
+    let Some(expected_sha256) = record.artifact_sha256.as_deref() else {
+        return false;
+    };
+    let Ok(decoded_digest) = hex::decode(expected_sha256) else {
+        return false;
+    };
+    decoded_digest.len() == 32
+        && record.archive_id.is_some()
+        && record.format_version == Some(smcv_backup::FORMAT_VERSION)
+        && record.logical_vault_id.is_some()
+        && record.source_recovery_epoch.is_some()
+        && record.record_count.is_some()
+        && open_restrictive_artifact(path, expected_bytes).is_ok()
+}
+
 enum OwnedArchiveKey {
     Passphrase(Zeroizing<String>),
     Recovery(RecoveryKey),
@@ -376,6 +465,7 @@ pub(super) struct BackupStatusResponse {
     logical_vault_id: Option<Uuid>,
     source_recovery_epoch: Option<u64>,
     archive_bytes: Option<u64>,
+    artifact_sha256: Option<String>,
     record_count: Option<u64>,
     download_started: bool,
     error_code: Option<String>,
@@ -406,6 +496,10 @@ pub(super) async fn list_backups(
     }))
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "backup admission keeps key custody, quota, and detached-job publication together"
+)]
 pub(super) async fn create_backup(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -465,7 +559,10 @@ pub(super) async fn create_backup(
     let job_id = job.job_id;
     tokio::task::spawn_blocking(move || {
         let _expensive_slot = expensive_slot;
-        if let Ok(report) = vault.create_backup_file(&artifact, key.borrowed(), now_unix_ms()) {
+        if let Ok(report) = vault.create_backup_file(&artifact, key.borrowed(), now_unix_ms())
+            && let Ok((_verified_file, artifact_sha256)) =
+                open_and_digest_artifact(&artifact, report.archive_bytes, None)
+        {
             let completed = jobs.update(job_id, |record| {
                 record.state = JobState::Completed;
                 record.expires_at_unix_ms = now_unix_ms()
@@ -476,6 +573,7 @@ pub(super) async fn create_backup(
                 record.logical_vault_id = Some(logical_vault_id);
                 record.source_recovery_epoch = Some(source_recovery_epoch);
                 record.archive_bytes = Some(report.archive_bytes);
+                record.artifact_sha256 = Some(artifact_sha256);
                 record.record_count = Some(report.record_count);
             });
             if completed.is_err() {
@@ -549,27 +647,58 @@ pub(super) async fn download_backup(
     if job.state != JobState::Completed {
         return Err(ApiError::not_found(request_id_value));
     }
-    let request = Request::builder()
-        .body(Body::empty())
-        .map_err(|_| ApiError::unavailable(request_id_value))?;
-    let served = ServeFile::new(state.backup_jobs.artifact_path(job_id))
-        .oneshot(request)
-        .await
-        .map_err(|_| ApiError::unavailable(request_id_value))?;
-    if served.status() != StatusCode::OK {
-        return Err(ApiError::not_found(request_id_value));
-    }
+    let expected_bytes = job
+        .archive_bytes
+        .ok_or_else(|| ApiError::unavailable(request_id_value))?;
+    let expected_sha256 = job
+        .artifact_sha256
+        .clone()
+        .ok_or_else(|| ApiError::unavailable(request_id_value))?;
+    let expensive_slot = Arc::clone(&state.archive_slots)
+        .try_acquire_owned()
+        .map_err(|_| ApiError::rate_limited(request_id_value))?;
+    let artifact_path = state.backup_jobs.artifact_path(job_id);
+    let opened = tokio::task::spawn_blocking(move || {
+        let _expensive_slot = expensive_slot;
+        open_and_digest_artifact(&artifact_path, expected_bytes, Some(&expected_sha256))
+    })
+    .await;
+    let Ok(Ok((file, _digest))) = opened else {
+        state
+            .backup_jobs
+            .update(job_id, |record| {
+                record.state = JobState::Failed;
+                record.expires_at_unix_ms = now_unix_ms()
+                    .max(record.created_at_unix_ms)
+                    .saturating_add(JOB_TTL_MS);
+                record.error_code = Some("artifact_integrity_failed".to_owned());
+            })
+            .map_err(|_| ApiError::unavailable(request_id_value))?;
+        remove_if_exists(&state.backup_jobs.artifact_path(job_id))
+            .map_err(|_| ApiError::unavailable(request_id_value))?;
+        return Err(ApiError::unavailable(request_id_value));
+    };
     state
         .backup_jobs
         .update(job_id, |record| record.download_started = true)
         .map_err(|_| ApiError::unavailable(request_id_value))?;
-    let (parts, body) = served.into_parts();
-    let mut response = Response::from_parts(parts, Body::new(body));
+    let stream = ReaderStream::new(tokio::fs::File::from_std(file));
+    let mut response = Response::new(Body::from_stream(stream));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_LENGTH,
+        HeaderValue::from_str(&expected_bytes.to_string())
+            .map_err(|_| ApiError::unavailable(request_id_value))?,
+    );
     response.headers_mut().insert(
         header::CONTENT_DISPOSITION,
         HeaderValue::from_str(&format!("attachment; filename=\"{job_id}.smcvault\""))
             .map_err(|_| ApiError::unavailable(request_id_value))?,
     );
+    apply_security_headers(response.headers_mut());
     Ok(response)
 }
 
@@ -848,6 +977,7 @@ fn status_response(job: BackupJobRecord) -> BackupStatusResponse {
         logical_vault_id: job.logical_vault_id,
         source_recovery_epoch: job.source_recovery_epoch,
         archive_bytes: job.archive_bytes,
+        artifact_sha256: job.artifact_sha256,
         record_count: job.record_count,
         download_started: job.download_started,
         error_code: job.error_code,
@@ -871,7 +1001,7 @@ mod tests {
 
     use tempfile::TempDir;
 
-    use super::{BackupJobRegistry, JobState};
+    use super::{BackupJobRegistry, JobState, open_and_digest_artifact};
 
     #[test]
     fn process_restart_durably_fails_an_interrupted_job() -> Result<(), std::io::Error> {
@@ -902,6 +1032,42 @@ mod tests {
         assert_eq!(recovered.state, JobState::Failed);
         assert_eq!(recovered.error_code.as_deref(), Some("interrupted"));
         assert!(!reopened.artifact_path(job.job_id).exists());
+        Ok(())
+    }
+
+    #[test]
+    fn process_restart_fails_completed_status_with_unsafe_artifact() -> Result<(), std::io::Error> {
+        let root = TempDir::new()?;
+        let directory = root.path().join("jobs");
+        let registry = BackupJobRegistry::open(&directory)?;
+        let job = registry.create(crate::now_unix_ms())?;
+        let artifact = registry.artifact_path(job.job_id);
+        fs::write(&artifact, b"encrypted completed artifact")?;
+        fs::set_permissions(&artifact, fs::Permissions::from_mode(0o600))?;
+        let (_, digest) = open_and_digest_artifact(&artifact, 28, None)?;
+        registry.update(job.job_id, |record| {
+            record.state = JobState::Completed;
+            record.archive_id = Some(uuid::Uuid::new_v4());
+            record.format_version = Some(smcv_backup::FORMAT_VERSION);
+            record.logical_vault_id = Some(uuid::Uuid::new_v4());
+            record.source_recovery_epoch = Some(1);
+            record.archive_bytes = Some(28);
+            record.artifact_sha256 = Some(digest);
+            record.record_count = Some(1);
+        })?;
+        drop(registry);
+        fs::set_permissions(&artifact, fs::Permissions::from_mode(0o644))?;
+
+        let reopened = BackupJobRegistry::open(&directory)?;
+        let recovered = reopened
+            .get(job.job_id)
+            .ok_or_else(|| std::io::Error::other("recovered job missing"))?;
+        assert_eq!(recovered.state, JobState::Failed);
+        assert_eq!(
+            recovered.error_code.as_deref(),
+            Some("artifact_integrity_failed")
+        );
+        assert!(!artifact.exists());
         Ok(())
     }
 

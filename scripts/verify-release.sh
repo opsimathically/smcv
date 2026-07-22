@@ -128,6 +128,7 @@ root="$extracted/$expected_root"
     jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' "sbom/$crate.cdx.json" >/dev/null
   done
   test -f Cargo.lock
+  test -f api/openapi.yaml
   test -f external_assurance/README.md
   test -f docs/RELEASE_NOTES_0.1.0.md
   test -f ai_phase_evidence/FINAL_REQUIREMENTS_TRACEABILITY.md

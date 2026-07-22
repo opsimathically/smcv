@@ -395,7 +395,10 @@ async fn enforce_request_timeout(
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let duration = if request.uri().path() == "/api/v1/backup-verifications" {
+    let path = request.uri().path();
+    let duration = if path == "/api/v1/backup-verifications"
+        || (path.starts_with("/api/v1/backups/") && path.ends_with("/download"))
+    {
         Duration::from_secs(15 * 60)
     } else {
         Duration::from_secs(15)
@@ -2045,7 +2048,9 @@ async fn openapi() -> Json<serde_json::Value> {
     Json(openapi_document())
 }
 
-fn openapi_document() -> serde_json::Value {
+/// Returns the complete checked and served `OpenAPI` contract.
+#[must_use]
+pub fn openapi_document() -> serde_json::Value {
     serde_json::json!({
         "openapi": "3.1.0",
         "info": {
@@ -3102,6 +3107,7 @@ mod tests {
             .unwrap_or_else(|error| panic!("status body must parse: {error}"));
             assert!(value.get("recovery_key").is_none());
             if value["state"] == "completed" {
+                assert_eq!(value["artifact_sha256"].as_str().map(str::len), Some(64));
                 completed = true;
                 break;
             }
@@ -3131,6 +3137,13 @@ mod tests {
                 .get("content-type")
                 .and_then(|value| value.to_str().ok()),
             Some("application/octet-stream")
+        );
+        assert_eq!(
+            download
+                .headers()
+                .get("cache-control")
+                .and_then(|value| value.to_str().ok()),
+            Some("no-store")
         );
         let archive = to_bytes(download.into_body(), 1024 * 1024)
             .await
@@ -3170,7 +3183,7 @@ mod tests {
             .header("x-smcv-csrf", csrf)
             .body(Body::from(multipart))
             .unwrap_or_else(|error| panic!("verification request must build: {error}"));
-        let verification = router(state)
+        let verification = router(state.clone())
             .oneshot(verification)
             .await
             .unwrap_or_else(|error| panic!("verification must respond: {error}"));
@@ -3183,6 +3196,46 @@ mod tests {
         .unwrap_or_else(|error| panic!("verification report must parse: {error}"));
         assert_eq!(report["integrity_verified"], true);
         assert_eq!(report["restore_tested"], true);
+
+        let artifact_path = root
+            .path()
+            .join(format!("data/backup-artifacts/{job_id}.smcvault"));
+        let mut corrupted = archive.to_vec();
+        let last = corrupted
+            .last_mut()
+            .unwrap_or_else(|| panic!("archive must not be empty"));
+        *last ^= 0x01;
+        fs::write(&artifact_path, corrupted)
+            .unwrap_or_else(|error| panic!("artifact corruption fixture must write: {error}"));
+        let rejected_download = Request::builder()
+            .uri(format!("/api/v1/backups/{job_id}/download"))
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap_or_else(|error| panic!("rejected download request must build: {error}"));
+        let rejected_download = router(state.clone())
+            .oneshot(rejected_download)
+            .await
+            .unwrap_or_else(|error| panic!("rejected download must respond: {error}"));
+        assert_eq!(rejected_download.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert!(!artifact_path.exists());
+
+        let failed_status = Request::builder()
+            .uri(format!("/api/v1/backups/{job_id}"))
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap_or_else(|error| panic!("failed status request must build: {error}"));
+        let failed_status = router(state)
+            .oneshot(failed_status)
+            .await
+            .unwrap_or_else(|error| panic!("failed status must respond: {error}"));
+        let failed: serde_json::Value = serde_json::from_slice(
+            &to_bytes(failed_status.into_body(), 16 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("failed status body must read: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("failed status body must parse: {error}"));
+        assert_eq!(failed["state"], "failed");
+        assert_eq!(failed["error_code"], "artifact_integrity_failed");
         let leftovers: Vec<_> = fs::read_dir(root.path().join("data/backup-artifacts"))
             .unwrap_or_else(|error| panic!("artifact directory must read: {error}"))
             .filter_map(Result::ok)

@@ -167,6 +167,11 @@ It never overwrites an existing destination by default.
 For web creation, the verified encrypted artifact uses an opaque randomized
 server filename, restrictive permissions, per-owner size/count quotas, and a
 short explicit expiry. Durable job status survives a browser disconnect.
+Completed status includes the encrypted artifact's byte count and SHA-256;
+download validates both plus same-owner restrictive regular-file custody, then
+streams from the already-validated no-follow descriptor. Corruption or an
+unsafe path transitions the job to `failed/artifact_integrity_failed` and
+removes the suspect file.
 Downloading does not prove the owner retained an off-host copy; the UI records
 download status separately and removes the server artifact after configured
 download/expiry behavior.

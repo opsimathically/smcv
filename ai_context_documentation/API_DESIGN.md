@@ -203,4 +203,11 @@ restrictive creation permissions, per-owner quotas, short expiry, and explicit
 deletion after download/expiry. Expiry starts from a terminal result and never
 removes state beneath a running worker. The UI records only that an HTTP
 download was started; it never treats that as proof of transfer completion or
-off-host custody.
+off-host custody. Completed status binds the encrypted file's byte length and
+SHA-256 digest. Download reopens with no-follow semantics, validates restrictive
+same-owner metadata, recomputes the digest, and streams from that exact file
+descriptor with private/no-store response headers. A mismatch durably fails the
+job and removes the suspect artifact.
+
+The checked-in `api/openapi.yaml` is generated from the same Rust document
+served at `/api/v1/openapi.json`; repository validation rejects any drift.

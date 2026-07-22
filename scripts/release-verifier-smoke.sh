@@ -10,11 +10,12 @@ marker="$temporary/executed-untrusted-binary"
 make_fixture() {
   version=$1
   root="$temporary/smcv-$version-x86_64-unknown-linux-gnu"
-  mkdir -p "$root/bin" "$root/docs" "$root/external_assurance" \
+  mkdir -p "$root/api" "$root/bin" "$root/docs" "$root/external_assurance" \
     "$root/ai_phase_evidence" "$root/sbom"
   printf '#!/bin/sh\ntouch %s\n' "$marker" > "$root/bin/smcv-cli"
   chmod 0755 "$root/bin/smcv-cli"
   printf 'synthetic locked graph\n' > "$root/Cargo.lock"
+  printf '{"openapi":"3.1.0"}\n' > "$root/api/openapi.yaml"
   printf '# Synthetic release notes\n' > "$root/docs/RELEASE_NOTES_0.1.0.md"
   printf '# Synthetic handoff\n' > "$root/external_assurance/README.md"
   printf '# Synthetic traceability\n' > "$root/ai_phase_evidence/FINAL_REQUIREMENTS_TRACEABILITY.md"
@@ -123,4 +124,19 @@ if "$repository/scripts/verify-release.sh" \
   exit 1
 fi
 
-printf 'signed_archive_not_executed=passed\nwrong_signature_key=passed\nunlisted_file=passed\nlink_member=passed\nmissing_outer_checksum=passed\nmalformed_outer_checksum=passed\nwrong_glibc_baseline=passed\n'
+make_fixture 9.9.3
+rm "$temporary/smcv-9.9.3-x86_64-unknown-linux-gnu/api/openapi.yaml"
+(
+  cd "$temporary/smcv-9.9.3-x86_64-unknown-linux-gnu"
+  find . -type f ! -name SHA256SUMS | LC_ALL=C sort | while IFS= read -r file; do
+    sha256sum "$file"
+  done > SHA256SUMS
+)
+pack_fixture 9.9.3
+if "$repository/scripts/verify-release.sh" \
+  "$temporary/smcv-9.9.3-x86_64-unknown-linux-gnu.tar.gz" >/dev/null 2>&1; then
+  echo "release verifier accepted a bundle without its API contract" >&2
+  exit 1
+fi
+
+printf 'signed_archive_not_executed=passed\nwrong_signature_key=passed\nunlisted_file=passed\nlink_member=passed\nmissing_outer_checksum=passed\nmalformed_outer_checksum=passed\nwrong_glibc_baseline=passed\nmissing_api_contract=passed\n'

@@ -1,58 +1,1226 @@
-openapi: 3.1.0
-info:
-  title: SMCV API
-  version: 0.1.0
-  description: >-
-    Phase 0 contract skeleton. Protected resource schemas and operations are
-    added in Phase 2 from the same versioned contract.
-servers:
-  - url: /api/v1
-paths:
-  /session:
-    get:
-      operationId: getSession
-      summary: Return safe current-session state
-      responses:
-        "200":
-          description: Current session state
-          headers:
-            Cache-Control:
-              schema:
-                type: string
-              description: Always no-store for session data.
-          content:
-            application/json:
-              schema:
-                $ref: "#/components/schemas/SessionState"
-        "401":
-          $ref: "#/components/responses/Problem"
-components:
-  schemas:
-    SessionState:
-      type: object
-      additionalProperties: false
-      required: [authenticated]
-      properties:
-        authenticated:
-          type: boolean
-    Problem:
-      type: object
-      additionalProperties: false
-      required: [code, message, request_id]
-      properties:
-        code:
-          type: string
-          maxLength: 64
-        message:
-          type: string
-          maxLength: 256
-        request_id:
-          type: string
-          format: uuid
-  responses:
-    Problem:
-      description: Safe error response
-      content:
-        application/problem+json:
-          schema:
-            $ref: "#/components/schemas/Problem"
+{
+  "components": {
+    "parameters": {
+      "After": {
+        "in": "query",
+        "name": "after",
+        "schema": {
+          "default": 0,
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "AuditAfter": {
+        "in": "header",
+        "name": "X-SMCV-After-Sequence",
+        "schema": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "AuditLimit": {
+        "in": "header",
+        "name": "X-SMCV-Page-Size",
+        "schema": {
+          "default": 100,
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "CredentialAfter": {
+        "in": "query",
+        "name": "after",
+        "schema": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "CredentialId": {
+        "in": "path",
+        "name": "credential_id",
+        "required": true,
+        "schema": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "Id": {
+        "in": "path",
+        "name": "id",
+        "required": true,
+        "schema": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "IdempotencyKey": {
+        "in": "header",
+        "name": "Idempotency-Key",
+        "required": true,
+        "schema": {
+          "maxLength": 128,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "Limit": {
+        "in": "query",
+        "name": "limit",
+        "schema": {
+          "default": 50,
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "NamespaceIdQuery": {
+        "in": "query",
+        "name": "namespace_id",
+        "required": true,
+        "schema": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "ObjectAfter": {
+        "in": "query",
+        "name": "after",
+        "schema": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "ParentNamespaceId": {
+        "in": "query",
+        "name": "parent_namespace_id",
+        "schema": {
+          "format": "uuid",
+          "type": "string"
+        }
+      },
+      "Version": {
+        "in": "path",
+        "name": "version",
+        "required": true,
+        "schema": {
+          "minimum": 1,
+          "type": "integer"
+        }
+      }
+    },
+    "requestBodies": {
+      "JsonObject": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "type": "object"
+            }
+          }
+        },
+        "required": true
+      },
+      "Lifecycle": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Lifecycle"
+            }
+          }
+        },
+        "required": true
+      }
+    },
+    "responses": {
+      "Error": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Error"
+            }
+          }
+        },
+        "description": "Bounded non-enumerating error"
+      },
+      "Id": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/Id"
+            }
+          }
+        },
+        "description": "Created stable identifier"
+      },
+      "SecretValue": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "$ref": "#/components/schemas/SecretValue"
+            }
+          }
+        },
+        "description": "Explicit secret-bearing response",
+        "headers": {
+          "Cache-Control": {
+            "schema": {
+              "const": "no-store",
+              "type": "string"
+            }
+          }
+        }
+      },
+      "Session": {
+        "description": "Display-once CSRF token and secure session cookie"
+      }
+    },
+    "schemas": {
+      "BackupCreate": {
+        "additionalProperties": false,
+        "properties": {
+          "key_mode": {
+            "enum": [
+              "generated_recovery",
+              "passphrase"
+            ],
+            "type": "string"
+          },
+          "passphrase": {
+            "maxLength": 1024,
+            "minLength": 16,
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "key_mode"
+        ],
+        "type": "object"
+      },
+      "Error": {
+        "additionalProperties": false,
+        "example": {
+          "code": "resource_unavailable",
+          "message": "The requested resource is unavailable.",
+          "request_id": "00000000-0000-4000-8000-000000000001"
+        },
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "message": {
+            "type": "string"
+          },
+          "request_id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "message",
+          "request_id"
+        ],
+        "type": "object"
+      },
+      "Id": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "format": "uuid",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "Lifecycle": {
+        "additionalProperties": false,
+        "properties": {
+          "expected_revision": {
+            "minimum": 1,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "expected_revision"
+        ],
+        "type": "object"
+      },
+      "PasswordLogin": {
+        "additionalProperties": false,
+        "properties": {
+          "password": {
+            "maxLength": 1024,
+            "minLength": 12,
+            "type": "string",
+            "writeOnly": true
+          }
+        },
+        "required": [
+          "password"
+        ],
+        "type": "object"
+      },
+      "SecretValue": {
+        "additionalProperties": false,
+        "example": {
+          "value_base64": "c3ludGhldGlj"
+        },
+        "properties": {
+          "value_base64": {
+            "contentEncoding": "base64",
+            "readOnly": true,
+            "type": "string"
+          }
+        },
+        "required": [
+          "value_base64"
+        ],
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "SMCV application credential",
+        "scheme": "bearer",
+        "type": "http"
+      },
+      "sessionCookie": {
+        "in": "cookie",
+        "name": "__Host-smcv_session",
+        "type": "apiKey"
+      }
+    }
+  },
+  "info": {
+    "description": "Same-origin, non-enumerating API for one encrypted SMCV vault. Secret-bearing responses are never cacheable.",
+    "title": "SMCV API",
+    "version": "1.0.0"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/audit-events": {
+      "get": {
+        "operationId": "auditEvents",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/AuditAfter"
+          },
+          {
+            "$ref": "#/components/parameters/AuditLimit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Authenticated audit records"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read bounded audit page"
+      }
+    },
+    "/backup-verifications": {
+      "post": {
+        "operationId": "verifyUploadedBackup",
+        "requestBody": {
+          "content": {
+            "multipart/form-data": {
+              "schema": {
+                "properties": {
+                  "archive": {
+                    "format": "binary",
+                    "type": "string"
+                  },
+                  "key": {
+                    "format": "password",
+                    "type": "string",
+                    "writeOnly": true
+                  },
+                  "key_mode": {
+                    "enum": [
+                      "generated_recovery",
+                      "recovery_key",
+                      "passphrase"
+                    ],
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "key_mode",
+                  "key",
+                  "archive"
+                ],
+                "type": "object"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Authenticated metadata and successful clean restore drill"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Fully verify and clean-restore-test an uploaded portable archive"
+      }
+    },
+    "/backups": {
+      "get": {
+        "operationId": "listBackupJobs",
+        "responses": {
+          "200": {
+            "description": "Unexpired backup jobs without recovery material"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List safe durable backup job status"
+      },
+      "post": {
+        "operationId": "createBackupJob",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BackupCreate"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "202": {
+            "description": "Opaque job and optional display-once recovery key"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Start a durable portable-backup job"
+      }
+    },
+    "/backups/{id}": {
+      "delete": {
+        "operationId": "deleteBackupArtifact",
+        "responses": {
+          "204": {
+            "description": "Artifact removed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Delete an encrypted server artifact and status"
+      },
+      "get": {
+        "operationId": "backupJobStatus",
+        "responses": {
+          "200": {
+            "description": "Safe job status without key material"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read safe durable backup status"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ]
+    },
+    "/backups/{id}/download": {
+      "get": {
+        "operationId": "downloadBackupArtifact",
+        "responses": {
+          "200": {
+            "content": {
+              "application/octet-stream": {}
+            },
+            "description": "Portable .smcvault stream"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Download a verified encrypted archive"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ]
+    },
+    "/namespaces": {
+      "get": {
+        "operationId": "listNamespaces",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/ParentNamespaceId"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectAfter"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded namespace page"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List protected child namespace metadata"
+      },
+      "post": {
+        "operationId": "createNamespace",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/Id"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create namespace"
+      }
+    },
+    "/namespaces/{id}/move": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "operationId": "moveNamespace",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "description": "New revision"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Move namespace with confirmed access delta"
+      }
+    },
+    "/namespaces/{id}/move-impact": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "operationId": "previewNamespaceMove",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "description": "Service/action access delta"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Preview exact access broadening"
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openApiDocument",
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document"
+          }
+        },
+        "security": [],
+        "summary": "Read this API contract"
+      }
+    },
+    "/policies": {
+      "get": {
+        "operationId": "listPolicies",
+        "responses": {
+          "200": {
+            "description": "Bounded policy page"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List protected policy metadata"
+      },
+      "post": {
+        "operationId": "createPolicy",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/Id"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create allow-only policy"
+      }
+    },
+    "/policies/{id}": {
+      "get": {
+        "operationId": "readPolicy",
+        "responses": {
+          "200": {
+            "description": "Policy metadata and state"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read policy"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ]
+    },
+    "/policies/{id}/archive": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "operationId": "archivePolicy",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Lifecycle"
+        },
+        "responses": {
+          "200": {
+            "description": "New revision"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Archive policy"
+      }
+    },
+    "/policies/{id}/bindings": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "operationId": "bindPolicy",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "204": {
+            "description": "Policy bound"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Bind policy to service identity"
+      }
+    },
+    "/policies/{id}/grants": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "operationId": "addPolicyGrant",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/Id"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Add closed allow-only grant"
+      }
+    },
+    "/policies/{id}/rules": {
+      "get": {
+        "operationId": "readPolicyRules",
+        "responses": {
+          "200": {
+            "description": "Policy rules and authorization revision"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read exact policy grants and bindings"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ]
+    },
+    "/secrets": {
+      "get": {
+        "operationId": "listSecrets",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceIdQuery"
+          },
+          {
+            "$ref": "#/components/parameters/ObjectAfter"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded metadata-only secret page"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List protected secret metadata"
+      },
+      "post": {
+        "operationId": "createSecret",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/IdempotencyKey"
+          }
+        ],
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Secret identifier and version preconditions"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create encrypted secret"
+      }
+    },
+    "/secrets/lifecycle": {
+      "get": {
+        "operationId": "listSecretLifecycle",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/NamespaceIdQuery"
+          },
+          {
+            "in": "query",
+            "name": "state",
+            "required": true,
+            "schema": {
+              "enum": [
+                "active",
+                "archived",
+                "deleted"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "$ref": "#/components/parameters/ObjectAfter"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded lifecycle inventory without values"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List owner-visible secrets in one lifecycle state"
+      }
+    },
+    "/secrets/{id}": {
+      "get": {
+        "operationId": "readSecretMetadata",
+        "responses": {
+          "200": {
+            "description": "Decrypted metadata"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read protected metadata"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "put": {
+        "operationId": "updateSecret",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "200": {
+            "description": "New immutable version"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Append immutable secret version"
+      }
+    },
+    "/secrets/{id}/archive": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "operationId": "archiveSecret",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Lifecycle"
+        },
+        "responses": {
+          "200": {
+            "description": "New revision"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Archive secret"
+      }
+    },
+    "/secrets/{id}/delete": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "operationId": "deleteSecret",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Lifecycle"
+        },
+        "responses": {
+          "200": {
+            "description": "New revision"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Owner-tombstone a secret while retaining encrypted history"
+      }
+    },
+    "/secrets/{id}/purge": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "operationId": "purgeSecret",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "204": {
+            "description": "Current-vault ciphertext purged; tombstone and audit retained"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Owner-purge current-vault ciphertext after retention approval"
+      }
+    },
+    "/secrets/{id}/restore": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "operationId": "restoreSecret",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Lifecycle"
+        },
+        "responses": {
+          "200": {
+            "description": "New revision"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Restore archived secret"
+      }
+    },
+    "/secrets/{id}/value": {
+      "get": {
+        "operationId": "revealCurrentSecret",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SecretValue"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Explicitly reveal current value"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ]
+    },
+    "/secrets/{id}/versions": {
+      "get": {
+        "operationId": "listSecretVersions",
+        "responses": {
+          "200": {
+            "description": "Bounded version page"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List immutable version metadata"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        },
+        {
+          "$ref": "#/components/parameters/After"
+        },
+        {
+          "$ref": "#/components/parameters/Limit"
+        }
+      ]
+    },
+    "/secrets/{id}/versions/{version}/value": {
+      "get": {
+        "operationId": "revealSecretVersion",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/SecretValue"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Explicitly reveal historical value"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        },
+        {
+          "$ref": "#/components/parameters/Version"
+        }
+      ]
+    },
+    "/service-identities": {
+      "get": {
+        "operationId": "listServiceIdentities",
+        "responses": {
+          "200": {
+            "description": "Bounded application identity page"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List protected service-identity metadata"
+      },
+      "post": {
+        "operationId": "createServiceIdentity",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "$ref": "#/components/responses/Id"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Create service identity"
+      }
+    },
+    "/service-identities/{id}": {
+      "get": {
+        "operationId": "readServiceIdentity",
+        "responses": {
+          "200": {
+            "description": "Protected identity metadata"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Read service identity"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ]
+    },
+    "/service-identities/{id}/credentials": {
+      "get": {
+        "operationId": "listCredentials",
+        "parameters": [
+          {
+            "$ref": "#/components/parameters/CredentialAfter"
+          },
+          {
+            "$ref": "#/components/parameters/Limit"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Bounded credential page without bearer values"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "List safe credential lifecycle metadata"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ],
+      "post": {
+        "operationId": "issueCredential",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/JsonObject"
+        },
+        "responses": {
+          "201": {
+            "description": "Display-once credential"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Issue display-once application credential"
+      }
+    },
+    "/service-identities/{id}/credentials/{credential_id}/revoke": {
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        },
+        {
+          "$ref": "#/components/parameters/CredentialId"
+        }
+      ],
+      "post": {
+        "operationId": "revokeCredential",
+        "requestBody": {
+          "$ref": "#/components/requestBodies/Lifecycle"
+        },
+        "responses": {
+          "200": {
+            "description": "New revision"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Revoke application credential"
+      }
+    },
+    "/service-identities/{id}/effective-access": {
+      "get": {
+        "operationId": "effectiveAccess",
+        "responses": {
+          "200": {
+            "description": "Closed effective action set"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Compute current effective access"
+      },
+      "parameters": [
+        {
+          "$ref": "#/components/parameters/Id"
+        }
+      ]
+    },
+    "/session": {
+      "delete": {
+        "operationId": "logout",
+        "responses": {
+          "204": {
+            "description": "Session revoked"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Revoke owner session"
+      },
+      "get": {
+        "operationId": "sessionStatus",
+        "responses": {
+          "200": {
+            "description": "Current session state"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Inspect owner session"
+      }
+    },
+    "/session/passkeys/authentication/options": {
+      "post": {
+        "operationId": "startPasskeyAuthentication",
+        "responses": {
+          "200": {
+            "description": "One-use authentication options"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [],
+        "summary": "Start owner passkey authentication"
+      }
+    },
+    "/session/passkeys/authentication/verify": {
+      "post": {
+        "operationId": "finishPasskeyAuthentication",
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Session"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [],
+        "summary": "Verify passkey and create session"
+      }
+    },
+    "/session/passkeys/registration/options": {
+      "post": {
+        "operationId": "startPasskeyRegistration",
+        "responses": {
+          "200": {
+            "description": "One-use registration options"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Start owner passkey registration"
+      }
+    },
+    "/session/passkeys/registration/verify": {
+      "post": {
+        "operationId": "finishPasskeyRegistration",
+        "responses": {
+          "204": {
+            "description": "Passkey registered"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "summary": "Verify owner passkey registration"
+      }
+    },
+    "/session/password": {
+      "post": {
+        "operationId": "passwordLogin",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PasswordLogin"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "$ref": "#/components/responses/Session"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error"
+          }
+        },
+        "security": [],
+        "summary": "Create owner session"
+      }
+    }
+  },
+  "security": [
+    {
+      "sessionCookie": []
+    },
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "url": "/api/v1"
+    }
+  ]
+}

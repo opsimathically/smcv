@@ -9,6 +9,15 @@ cargo audit
 cargo deny check
 sh -n scripts/*.sh
 
+generated_openapi=$(mktemp)
+cleanup_openapi() { rm -f -- "$generated_openapi"; }
+trap cleanup_openapi EXIT HUP INT TERM
+cargo run --locked --quiet -p smcv-server --example export_openapi >"$generated_openapi"
+if ! cmp -s api/openapi.yaml "$generated_openapi"; then
+  echo "api/openapi.yaml differs from the server-owned OpenAPI contract" >&2
+  exit 1
+fi
+
 if ! grep -Fq 'runs-on: ubuntu-24.04' .github/workflows/ci.yml; then
   echo "CI runner baseline is not pinned to Ubuntu 24.04" >&2
   exit 1

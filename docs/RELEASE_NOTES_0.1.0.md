@@ -1,7 +1,7 @@
 # SMCV 0.1.0 release-candidate notes
 
 Status: **Production-ready local candidate; not publicly published**
-Candidate date: 2026-07-21
+Candidate date: 2026-07-22
 
 SMCV 0.1.0 is the first complete release candidate of the self-hosted Secret
 Manager and Credentials Vault. It includes the encrypted vault, owner and
@@ -74,3 +74,10 @@ accepted on 2026-07-21 (D-015) that independent security assurance follows
 complete development and may create later remediation work. Personal testing
 with real recovery-key custody also follows development under D-016. Neither
 post-development activity is represented as already completed.
+
+A subsequent ten-pass whole-project adversarial campaign repaired release
+verification, key custody, authentication, authorization/audit, persistence,
+recovery, browser, operational, supply-chain, artifact-download, and API
+contract boundaries. The checked-in API is now generated from the served
+contract, and completed web-backup artifacts are digest-bound and revalidated
+before no-store descriptor streaming.

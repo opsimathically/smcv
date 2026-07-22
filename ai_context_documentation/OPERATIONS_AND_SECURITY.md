@@ -149,6 +149,9 @@ runtime threads with repeated scans.
   restrictive permissions, and short terminal-state expiry; running jobs are
   never expired underneath their workers. Their presence or an initiated HTTP
   response is not described as completed transfer or off-host owner custody.
+  Durable completion binds size and SHA-256. Download uses a no-follow,
+  same-owner regular-file descriptor, recomputes the digest before response,
+  streams that descriptor directly, and fails/removes a mismatched artifact.
 - Archive creation and verification share one slot independent from the four
   password slots. Accepted logical plaintext and attacker-selected Argon2
   memory parameters are each capped at 256 MiB.

@@ -1,7 +1,8 @@
 # Ten-pass adversarial project review
 
-Status: **In progress**
+Status: **Complete**
 Started: 2026-07-22
+Completed: 2026-07-22
 Scope: complete SMCV repository and 0.1.0 release-candidate behavior
 
 This campaign performs ten consecutive reviews from different failure
@@ -206,3 +207,37 @@ build graph inventory, native ELF linkage/hardening inspection, upstream action
 commit resolution, release-verifier baseline rejection, nginx policy checks,
 release construction/verification, strict workspace lint/tests/docs, and shell
 syntax. No Pass 9 critical/high finding remains open.
+
+## Pass 10 — assembled release candidate and residual closure
+
+Perspective: an integrator trusting the shipped API, a local artifact replacer,
+bit rot after backup completion, a caching client, and a release consumer
+accepting a self-consistent but incomplete bundle. Result: **three findings
+repaired and retested**.
+
+| ID | Severity | Finding | Repair and verification |
+|---|---|---|---|
+| A10-R10-001 | High | A completed web-backup status did not bind the encrypted artifact to a digest. Download reopened the pathname through the generic static-file service, so same-length corruption or final-path replacement after creation verification could be served. Startup could also retain a completed status whose artifact was absent or unsafe. | Completion now records SHA-256 plus exact size. Startup requires coherent completion metadata and a same-owner restrictive regular artifact. Download opens once with `O_NOFOLLOW`/`O_CLOEXEC`, validates descriptor metadata and size, recomputes SHA-256 under the single archive-work slot, persists `download_started`, and streams that exact descriptor. A mismatch durably becomes `failed/artifact_integrity_failed` and removes the suspect file; regression coverage corrupts one same-length byte and proves no response body is served. |
+| A10-R10-002 | Medium | The generic download response did not apply the private-response security headers used for secret-bearing JSON. A browser or intermediary could cache the portable encrypted vault despite the server's intentionally ephemeral custody semantics. | Download now emits `Cache-Control: no-store`, legacy no-cache, nosniff, framing/isolation, referrer, and capability-denial headers while retaining exact content length/type/disposition. The end-to-end backup regression asserts no-store. The pre-response integrity scan receives the same 15-minute bounded request window as archive verification. |
+| A10-R10-003 | Medium | The release's checked-in `api/openapi.yaml` was still a 58-line Phase 0 session skeleton while the server exposed the complete current route document. Repository validation did not compare them, and release verification accepted a self-consistent bundle that omitted the API file entirely. | The checked-in API is now deterministic output from the public server-owned document. The repository gate regenerates and byte-compares it, release verification requires it, and a verifier fixture proves an otherwise self-consistent bundle without the contract is rejected. Runtime route/method parity remains independently tested. |
+
+Validation includes same-length encrypted-artifact corruption, descriptor-bound
+download/no-store behavior, restart custody normalization, generated/served API
+byte equality, missing-contract release rejection, strict all-target/all-feature
+Clippy, the full workspace gate, and the clean reproducible release-candidate
+campaign. No Pass 10 critical/high finding remains open.
+
+## Campaign conclusion
+
+The ten consecutive passes identified and repaired **49 findings**: 3 critical,
+17 high, 27 medium, and 2 low. Each pass reviewed the state produced by all
+earlier repairs rather than reviewing the original candidate in parallel. No
+identified finding remains open, and no unresolved critical/high internal
+finding remains. The documented residual-risk and post-development owner tasks
+remain honest product boundaries, not development blockers or silently claimed
+assurance.
+
+The final clean boundary runs the complete repository gate, verifier abuse
+fixtures, systemd parsing, deterministic two-build comparison, packaged-binary
+rollback and total-loss recovery campaign, release secret scan, and delivery
+continuity assertions. No artifact is pushed or published by this review.
