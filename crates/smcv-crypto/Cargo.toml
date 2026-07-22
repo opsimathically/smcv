@@ -14,11 +14,13 @@ sha2.workspace = true
 smcv-core = { version = "=0.1.0", path = "../smcv-core" }
 subtle.workspace = true
 thiserror.workspace = true
+unicode-normalization.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
 
 [dev-dependencies]
 hex.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

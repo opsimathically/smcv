@@ -3,12 +3,23 @@
 #![cfg_attr(test, allow(clippy::panic))]
 
 use core::fmt;
+use std::{
+    fs::{File, OpenOptions},
+    io::{Read, Write},
+    path::Path,
+};
+
+#[cfg(unix)]
+use std::os::unix::{fs::OpenOptionsExt, fs::PermissionsExt};
 
 use chacha20poly1305::{
     XChaCha20Poly1305, XNonce,
     aead::{Aead, Key, KeyInit, Payload},
 };
-use smcv_core::{InstallationId, ObjectId, ProtectedBytes, VaultId};
+use smcv_core::{
+    AuditEventId, InstallationId, NamespaceId, ObjectId, PrincipalId, ProtectedBytes,
+    ProtectedString, RequestId, VaultId,
+};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
@@ -22,8 +33,11 @@ pub const ENVELOPE_VERSION: u16 = 1;
 pub const TOKEN_SECRET_LENGTH: usize = 32;
 /// Non-secret lookup material in an application credential.
 pub const TOKEN_LOOKUP_LENGTH: usize = 12;
+/// Length of a version 1 local root-key file.
+pub const ROOT_KEY_FILE_LENGTH: usize = 72;
 
 const AAD_DOMAIN: &[u8; 8] = b"SMCV-AAD";
+const ROOT_KEY_MAGIC: &[u8; 8] = b"SMCVKEY1";
 
 /// Cryptographic failures with no protected diagnostic material.
 #[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
@@ -37,6 +51,12 @@ pub enum CryptoError {
     /// A credential does not have the supported bounded encoding.
     #[error("credential is invalid")]
     InvalidCredential,
+    /// A key provider is absent, insecure, corrupt, or unavailable.
+    #[error("root key provider is unavailable")]
+    KeyProvider,
+    /// Protected input violates a cryptographic boundary limit.
+    #[error("protected input is invalid")]
+    InvalidProtectedInput,
 }
 
 /// A result from the cryptographic adapter.
@@ -54,6 +74,18 @@ pub enum ObjectKind {
     WrappedDataKey = 3,
     /// A protected vault-scoped verifier key.
     VerifierKey = 4,
+    /// A metadata-specific DEK wrapped by a vault KEK.
+    WrappedMetadataKey = 5,
+    /// A vault KEK wrapped by an external root key.
+    WrappedKeyEncryptionKey = 6,
+    /// A vault-scoped blind-index key wrapped by a KEK.
+    BlindIndexKey = 7,
+    /// A vault-scoped audit commitment key wrapped by a KEK.
+    AuditKey = 8,
+    /// Protected namespace metadata.
+    NamespaceMetadata = 9,
+    /// A namespace metadata DEK wrapped by a vault KEK.
+    WrappedNamespaceMetadataKey = 10,
 }
 
 /// Stable context authenticated with an encrypted record.
@@ -108,6 +140,29 @@ impl KeyMaterial {
         Ok(Self::new(bytes))
     }
 
+    /// Converts a protected fixed-width plaintext into key material.
+    ///
+    /// # Errors
+    ///
+    /// Returns an integrity error when the protected value is not exactly one
+    /// 256-bit key.
+    pub fn from_protected(bytes: ProtectedBytes) -> CryptoResult<Self> {
+        let key: [u8; KEY_LENGTH] = bytes
+            .expose()
+            .try_into()
+            .map_err(|_| CryptoError::Integrity)?;
+        drop(bytes);
+        Ok(Self::new(key))
+    }
+
+    /// Copies the key into an explicitly protected, zeroizing transport value.
+    ///
+    /// This is intended only for wrapping or provider persistence boundaries.
+    #[must_use]
+    pub fn to_protected_bytes(&self) -> ProtectedBytes {
+        ProtectedBytes::new(self.expose().to_vec())
+    }
+
     fn expose(&self) -> &[u8; KEY_LENGTH] {
         &self.0
     }
@@ -117,6 +172,101 @@ impl fmt::Debug for KeyMaterial {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("KeyMaterial([REDACTED])")
     }
+}
+
+/// Root-key material loaded with its bound vault and installation identities.
+pub struct RootKeyRecord {
+    /// Logical vault identity embedded in the provider file.
+    pub vault_id: VaultId,
+    /// Installation identity embedded in the provider file.
+    pub installation_id: InstallationId,
+    /// Root key material, zeroized when dropped.
+    pub key: KeyMaterial,
+}
+
+impl fmt::Debug for RootKeyRecord {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RootKeyRecord")
+            .field("vault_id", &self.vault_id)
+            .field("installation_id", &self.installation_id)
+            .field("key", &"[REDACTED]")
+            .finish()
+    }
+}
+
+/// Creates a new restrictive root-key file without replacing an existing path.
+///
+/// The file binds its key to one logical vault and concrete installation.
+/// Callers must store it outside the database directory and exclude it from
+/// portable archives.
+///
+/// # Errors
+///
+/// Returns an error if randomness, restrictive creation, writing, or durable
+/// synchronization fails, or if the destination already exists.
+#[cfg(unix)]
+pub fn create_root_key_file(
+    path: &Path,
+    vault_id: VaultId,
+    installation_id: InstallationId,
+) -> CryptoResult<KeyMaterial> {
+    let key = KeyMaterial::generate()?;
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true).mode(0o600);
+    let mut file = options.open(path).map_err(|_| CryptoError::KeyProvider)?;
+    file.write_all(ROOT_KEY_MAGIC)
+        .and_then(|()| file.write_all(vault_id.as_bytes()))
+        .and_then(|()| file.write_all(installation_id.as_bytes()))
+        .and_then(|()| file.write_all(key.expose()))
+        .and_then(|()| file.sync_all())
+        .map_err(|_| CryptoError::KeyProvider)?;
+    sync_parent(path)?;
+    Ok(key)
+}
+
+/// Loads a restrictive root-key file and validates its fixed framing.
+///
+/// # Errors
+///
+/// Returns an error when the file is not regular, has group/other permission
+/// bits, has invalid framing, cannot be read, or cannot be bound to UUIDs.
+#[cfg(unix)]
+pub fn load_root_key_file(path: &Path) -> CryptoResult<RootKeyRecord> {
+    let metadata = path
+        .symlink_metadata()
+        .map_err(|_| CryptoError::KeyProvider)?;
+    if !metadata.file_type().is_file()
+        || metadata.len() != ROOT_KEY_FILE_LENGTH as u64
+        || metadata.permissions().mode() & 0o077 != 0
+    {
+        return Err(CryptoError::KeyProvider);
+    }
+    let mut bytes = Zeroizing::new([0_u8; ROOT_KEY_FILE_LENGTH]);
+    File::open(path)
+        .and_then(|mut file| file.read_exact(bytes.as_mut()))
+        .map_err(|_| CryptoError::KeyProvider)?;
+    if &bytes[0..8] != ROOT_KEY_MAGIC {
+        return Err(CryptoError::KeyProvider);
+    }
+    let vault_uuid = uuid::Uuid::from_slice(&bytes[8..24]).map_err(|_| CryptoError::KeyProvider)?;
+    let installation_uuid =
+        uuid::Uuid::from_slice(&bytes[24..40]).map_err(|_| CryptoError::KeyProvider)?;
+    let mut key = [0_u8; KEY_LENGTH];
+    key.copy_from_slice(&bytes[40..72]);
+    Ok(RootKeyRecord {
+        vault_id: VaultId::from_uuid(vault_uuid),
+        installation_id: InstallationId::from_uuid(installation_uuid),
+        key: KeyMaterial::new(key),
+    })
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> CryptoResult<()> {
+    let parent = path.parent().ok_or(CryptoError::KeyProvider)?;
+    File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|_| CryptoError::KeyProvider)
 }
 
 /// AEAD output containing public nonce and authenticated ciphertext.
@@ -152,6 +302,217 @@ impl TokenVerifier {
     pub const fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
+}
+
+/// Keyed exact-match index that reveals no human-readable name.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct BlindIndex([u8; 32]);
+
+impl BlindIndex {
+    /// Imports an index from its durable fixed-width representation.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the fixed-width durable representation.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+/// Canonical safe fields committed into one append-oriented audit event.
+pub struct AuditCommitmentInput<'a> {
+    /// Previous event commitment, or zeros for the first local event.
+    pub previous: [u8; 32],
+    /// Monotonic local event sequence.
+    pub sequence: u64,
+    /// Random event identifier.
+    pub event_id: AuditEventId,
+    /// Installation producing this segment.
+    pub installation_id: InstallationId,
+    /// Recovery epoch producing this segment.
+    pub recovery_epoch: u64,
+    /// Event wall-clock timestamp.
+    pub occurred_at_unix_ms: i64,
+    /// Correlated request identifier.
+    pub request_id: RequestId,
+    /// Acting principal when one exists.
+    pub actor_principal_id: Option<PrincipalId>,
+    /// Closed action vocabulary.
+    pub action: &'a str,
+    /// Closed target-kind vocabulary.
+    pub target_kind: &'a str,
+    /// Opaque target when one exists.
+    pub target_id: Option<ObjectId>,
+    /// Closed outcome vocabulary.
+    pub outcome: &'a str,
+}
+
+/// Keyed commitment linking one durable audit event to its predecessor.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct AuditCommitment([u8; 32]);
+
+impl AuditCommitment {
+    /// Imports a fixed-width durable commitment.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the fixed-width durable representation.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for AuditCommitment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("AuditCommitment([COMMITMENT])")
+    }
+}
+
+/// Keyed commitment over a canonical integrity-sensitive database state.
+#[derive(Clone, Copy, Eq, PartialEq)]
+pub struct StateCommitment([u8; 32]);
+
+impl StateCommitment {
+    /// Returns the fixed-width durable representation.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for StateCommitment {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("StateCommitment([COMMITMENT])")
+    }
+}
+
+/// Commits a bounded canonical encoding of clear database state using a
+/// separate domain from audit chaining and exact indexes.
+///
+/// # Errors
+///
+/// Returns invalid input for an empty encoding, an encoding larger than 4 KiB,
+/// or key initialization failure.
+pub fn state_commitment(
+    commitment_key: &KeyMaterial,
+    canonical_state: &[u8],
+) -> CryptoResult<StateCommitment> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    if canonical_state.is_empty() || canonical_state.len() > 4096 {
+        return Err(CryptoError::InvalidProtectedInput);
+    }
+    let length =
+        u16::try_from(canonical_state.len()).map_err(|_| CryptoError::InvalidProtectedInput)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(commitment_key.expose())
+        .map_err(|_| CryptoError::InvalidProtectedInput)?;
+    mac.update(b"SMCV-STATE-COMMITMENT\0v1\0");
+    mac.update(&length.to_be_bytes());
+    mac.update(canonical_state);
+    let mut commitment = [0_u8; 32];
+    commitment.copy_from_slice(&mac.finalize().into_bytes());
+    Ok(StateCommitment(commitment))
+}
+
+/// Computes the domain-separated commitment for one audit event.
+///
+/// # Errors
+///
+/// Returns an error if a string field is empty, exceeds its fixed limit, or
+/// the commitment key cannot initialize.
+pub fn audit_commitment(
+    audit_key: &KeyMaterial,
+    input: &AuditCommitmentInput<'_>,
+) -> CryptoResult<AuditCommitment> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let action_length = bounded_audit_text(input.action, 64)?;
+    let kind_length = bounded_audit_text(input.target_kind, 32)?;
+    let outcome_length = bounded_audit_text(input.outcome, 16)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(audit_key.expose())
+        .map_err(|_| CryptoError::InvalidProtectedInput)?;
+    mac.update(b"SMCV-AUDIT-COMMITMENT\0v1\0");
+    mac.update(&input.previous);
+    mac.update(&input.sequence.to_be_bytes());
+    mac.update(input.event_id.as_bytes());
+    mac.update(input.installation_id.as_bytes());
+    mac.update(&input.recovery_epoch.to_be_bytes());
+    mac.update(&input.occurred_at_unix_ms.to_be_bytes());
+    mac.update(input.request_id.as_bytes());
+    update_optional_id(&mut mac, input.actor_principal_id.map(PrincipalId::as_uuid));
+    mac.update(&action_length.to_be_bytes());
+    mac.update(input.action.as_bytes());
+    mac.update(&kind_length.to_be_bytes());
+    mac.update(input.target_kind.as_bytes());
+    update_optional_id(&mut mac, input.target_id.map(ObjectId::as_uuid));
+    mac.update(&outcome_length.to_be_bytes());
+    mac.update(input.outcome.as_bytes());
+    let mut commitment = [0_u8; 32];
+    commitment.copy_from_slice(&mac.finalize().into_bytes());
+    Ok(AuditCommitment(commitment))
+}
+
+fn bounded_audit_text(value: &str, max: usize) -> CryptoResult<u16> {
+    if value.is_empty() || value.len() > max || !value.is_ascii() {
+        return Err(CryptoError::InvalidProtectedInput);
+    }
+    u16::try_from(value.len()).map_err(|_| CryptoError::InvalidProtectedInput)
+}
+
+fn update_optional_id(mac: &mut hmac::Hmac<sha2::Sha256>, value: Option<uuid::Uuid>) {
+    use hmac::Mac as _;
+
+    if let Some(value) = value {
+        mac.update(&[1]);
+        mac.update(value.as_bytes());
+    } else {
+        mac.update(&[0]);
+    }
+}
+
+impl fmt::Debug for BlindIndex {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("BlindIndex([KEYED INDEX])")
+    }
+}
+
+/// Computes a case-sensitive NFC exact-match index scoped to one namespace.
+///
+/// # Errors
+///
+/// Returns an error for an empty name, more than 256 UTF-8 bytes after NFC
+/// normalization, control characters, or a verifier-key initialization error.
+pub fn exact_name_index(
+    blind_index_key: &KeyMaterial,
+    namespace_id: NamespaceId,
+    name: &ProtectedString,
+) -> CryptoResult<BlindIndex> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+    use unicode_normalization::UnicodeNormalization;
+
+    let normalized = Zeroizing::new(name.expose().nfc().collect::<String>());
+    if normalized.is_empty() || normalized.len() > 256 || normalized.chars().any(char::is_control) {
+        return Err(CryptoError::InvalidProtectedInput);
+    }
+    let length = u16::try_from(normalized.len()).map_err(|_| CryptoError::InvalidProtectedInput)?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(blind_index_key.expose())
+        .map_err(|_| CryptoError::InvalidProtectedInput)?;
+    mac.update(b"SMCV-BLIND-INDEX\0v1\0secret-name\0");
+    mac.update(namespace_id.as_bytes());
+    mac.update(&length.to_be_bytes());
+    mac.update(normalized.as_bytes());
+    let mut index = [0_u8; 32];
+    index.copy_from_slice(&mac.finalize().into_bytes());
+    Ok(BlindIndex(index))
 }
 
 impl fmt::Debug for TokenVerifier {
@@ -347,13 +708,27 @@ pub fn open(
 
 #[cfg(test)]
 mod tests {
-    use smcv_core::{InstallationId, ObjectId, ProtectedBytes, VaultId};
+    #[cfg(unix)]
+    use std::{
+        fs,
+        os::unix::fs::{PermissionsExt, symlink},
+    };
+
+    use smcv_core::{
+        AuditEventId, InstallationId, NamespaceId, ObjectId, ProtectedBytes, ProtectedString,
+        RequestId, VaultId,
+    };
+    #[cfg(unix)]
+    use tempfile::TempDir;
     use uuid::Uuid;
 
     use super::{
-        CryptoError, KeyMaterial, ObjectKind, RecordContext, SealedRecord, issue_token, open,
-        seal_with_nonce, verify_token,
+        AuditCommitmentInput, CryptoError, KeyMaterial, ObjectKind, RecordContext, SealedRecord,
+        audit_commitment, exact_name_index, issue_token, open, seal_with_nonce, state_commitment,
+        verify_token,
     };
+    #[cfg(unix)]
+    use super::{create_root_key_file, load_root_key_file};
 
     fn context(version: u64) -> RecordContext {
         RecordContext {
@@ -444,5 +819,109 @@ mod tests {
             .unwrap_or_else(|error| panic!("wrong-key token check must complete: {error}"))
         );
         assert!(!format!("{issued:?}").contains(issued.plaintext.expose()));
+    }
+
+    #[test]
+    fn blind_index_is_nfc_canonical_case_sensitive_and_namespace_scoped() {
+        let key = KeyMaterial::new([0x31; 32]);
+        let namespace = NamespaceId::random();
+        let composed = ProtectedString::new(String::from("Caf\u{e9}"));
+        let decomposed = ProtectedString::new(String::from("Cafe\u{301}"));
+        let uppercase = ProtectedString::new(String::from("CAF\u{c9}"));
+
+        let first = exact_name_index(&key, namespace, &composed)
+            .unwrap_or_else(|error| panic!("synthetic name must index: {error}"));
+        let equivalent = exact_name_index(&key, namespace, &decomposed)
+            .unwrap_or_else(|error| panic!("canonical synthetic name must index: {error}"));
+        let different_case = exact_name_index(&key, namespace, &uppercase)
+            .unwrap_or_else(|error| panic!("case variant must index: {error}"));
+        let different_namespace = exact_name_index(&key, NamespaceId::random(), &composed)
+            .unwrap_or_else(|error| panic!("namespace variant must index: {error}"));
+
+        assert_eq!(first, equivalent);
+        assert_ne!(first, different_case);
+        assert_ne!(first, different_namespace);
+        assert!(!format!("{first:?}").contains("Caf"));
+    }
+
+    #[test]
+    fn audit_commitment_links_every_canonical_field() {
+        let key = KeyMaterial::new([0x51; 32]);
+        let mut input = AuditCommitmentInput {
+            previous: [0x11; 32],
+            sequence: 7,
+            event_id: AuditEventId::random(),
+            installation_id: InstallationId::random(),
+            recovery_epoch: 2,
+            occurred_at_unix_ms: 1_800_000_000_000,
+            request_id: RequestId::random(),
+            actor_principal_id: None,
+            action: "secret:create",
+            target_kind: "secret",
+            target_id: Some(ObjectId::random()),
+            outcome: "allowed",
+        };
+        let first = audit_commitment(&key, &input)
+            .unwrap_or_else(|error| panic!("synthetic audit event must commit: {error}"));
+        input.sequence += 1;
+        let changed = audit_commitment(&key, &input)
+            .unwrap_or_else(|error| panic!("changed synthetic event must commit: {error}"));
+
+        assert_ne!(first, changed);
+        assert!(!format!("{first:?}").contains("secret:create"));
+    }
+
+    #[test]
+    fn state_commitment_authenticates_every_canonical_byte() {
+        let key = KeyMaterial::new([0x61; 32]);
+        let first = state_commitment(&key, b"canonical-clear-state")
+            .unwrap_or_else(|error| panic!("synthetic state must commit: {error}"));
+        let changed = state_commitment(&key, b"canonical-clear-statf")
+            .unwrap_or_else(|error| panic!("changed state must commit: {error}"));
+        assert_ne!(first, changed);
+        assert!(format!("{first:?}").contains("[COMMITMENT]"));
+        assert!(!format!("{first:?}").contains("canonical"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn root_key_file_is_bound_restrictive_and_never_overwritten() {
+        let directory = TempDir::new()
+            .unwrap_or_else(|error| panic!("synthetic key directory must open: {error}"));
+        let path = directory.path().join("root.key");
+        let expected = context(1);
+        create_root_key_file(&path, expected.vault_id, expected.installation_id)
+            .unwrap_or_else(|error| panic!("synthetic root key must create: {error}"));
+
+        let mode = fs::metadata(&path)
+            .unwrap_or_else(|error| panic!("synthetic key metadata must read: {error}"))
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o077, 0);
+        let loaded = load_root_key_file(&path)
+            .unwrap_or_else(|error| panic!("synthetic root key must load: {error}"));
+        assert_eq!(loaded.vault_id, expected.vault_id);
+        assert_eq!(loaded.installation_id, expected.installation_id);
+        assert!(format!("{loaded:?}").contains("[REDACTED]"));
+        assert!(matches!(
+            create_root_key_file(&path, expected.vault_id, expected.installation_id),
+            Err(CryptoError::KeyProvider)
+        ));
+
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o644))
+            .unwrap_or_else(|error| panic!("synthetic permissions must change: {error}"));
+        assert!(matches!(
+            load_root_key_file(&path),
+            Err(CryptoError::KeyProvider)
+        ));
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|error| panic!("synthetic permissions must restore: {error}"));
+        let link = directory.path().join("root-link.key");
+        symlink(&path, &link)
+            .unwrap_or_else(|error| panic!("synthetic provider symlink must create: {error}"));
+        assert!(matches!(
+            load_root_key_file(&link),
+            Err(CryptoError::KeyProvider)
+        ));
     }
 }

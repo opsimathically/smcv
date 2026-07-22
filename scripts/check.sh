@@ -8,8 +8,8 @@ RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo audit
 cargo deny check
 
-secret_prefix='smcv_'
-secret_pattern="-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|${secret_prefix}[A-Za-z0-9_-]{20,}"
+token_prefix='smcv_v1\.'
+secret_pattern="-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|${token_prefix}[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{43}"
 if rg -n -g '*.{rs,toml,md,json,yaml,yml}' -g '!target/**' -- \
   "$secret_pattern" .; then
   echo "possible committed secret pattern detected" >&2

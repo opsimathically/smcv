@@ -153,7 +153,10 @@ keys. More detail is in `BACKUP_AND_RECOVERY.md`.
 2. New writes use the new version.
 3. Rewrap existing DEKs in bounded resumable batches.
 4. Verify every live record has an allowed key version.
-5. Retire the old KEK only after a verified backup and explicit checkpoint.
+5. Verify that no live record remains under the old KEK, commit the maintenance
+   checkpoint, and retire it. Portable-backup readiness becomes an integrated
+   operational recommendation after Phase 3; it is not a Phase 1 development
+   blocker under D-013 and D-016.
 
 Interruption leaves both required KEKs available and resumes idempotently.
 

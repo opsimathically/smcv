@@ -24,13 +24,13 @@ Last reviewed: 2026-07-21
 | D-016 | Personal recovery-key custody testing occurs after complete development. Implementation still proves backup/restore and custody UX using synthetic material and automated clean-environment exercises. | Keeps personal key custody off the implementation critical path without weakening recovery engineering. |
 | D-101 | Use a random 256-bit DEK per immutable secret version, wrapped by a versioned KEK. | Limits key/nonce scope and permits KEK rotation by rewrapping rather than re-encrypting values. Validated in Phase 0. |
 | D-102 | Algorithm suite 1 uses XChaCha20-Poly1305 with fresh random 192-bit nonces, 128-bit tags, and fixed-width canonical AAD binding vault, installation, object type, object ID, and version. | Maintained RustCrypto construction, independently checked known-answer vector, and substitution/corruption failure tests. Validated in Phase 0. |
+| D-103 | Encrypt human-readable secret metadata and use namespace-scoped HMAC-SHA-256 exact-match indexes with decrypted collision confirmation. | Phase 1 database/WAL sentinel scans, NFC/case/scope tests, and authenticated metadata format fixture passed. |
 | D-107 | SQLite uses WAL, `synchronous=FULL`, foreign keys, bounded busy handling, trusted schema off, transactional checksummed migrations, and the online backup API. | Phase 0 recovery, rollback, configuration, checksum-drift, and snapshot tests validated the durability baseline. |
 
 ## Proposed: validate in Phase 0 or named phase
 
 | ID | Proposal | Validation gate |
 |---|---|---|
-| D-103 | Encrypt human-readable secret metadata and use keyed exact-match indexes where lookup requires it. | Phase 1 leakage and performance tests. |
 | D-104 | Use passkeys/WebAuthn as the preferred human authenticator with an Argon2id-protected password recovery or fallback path. | Phase 2 owner-flow and deployment review. |
 | D-105 | Use opaque random application tokens with a public lookup prefix and a keyed verifier stored server-side; the domain-separated vault verifier key is portably reprotected during backup restore. | Phase 2 credential and Phase 3 portability review. |
 | D-106 | Serve the UI and API from one origin and use server-side sessions in secure HTTP-only cookies. | Phase 2 and Phase 4 web threat review. |

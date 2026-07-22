@@ -9,7 +9,9 @@ publish.workspace = true
 hex.workspace = true
 rusqlite.workspace = true
 sha2.workspace = true
+smcv-core = { version = "=0.1.0", path = "../smcv-core" }
 thiserror.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

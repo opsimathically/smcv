@@ -1,9 +1,23 @@
 #![forbid(unsafe_code)]
 #![doc = "Application-service coordination for SMCV."]
+#![cfg_attr(test, allow(clippy::panic))]
 
 use std::{fmt, net::SocketAddr, path::PathBuf, time::Duration};
 
 use thiserror::Error;
+
+pub use smcv_core::SecretSchedule;
+
+mod initialization;
+mod rotation;
+mod vault_core;
+
+pub use initialization::{InitializationError, InitializedVault, initialize_vault};
+pub use rotation::{RootRotationOutcome, RotationProgress};
+pub use vault_core::{
+    AuditVerification, DecryptedMetadata, DueSecret, MetadataInput, OwnerPurgeApproval,
+    SecretCreated, VaultError, VaultOperationContext,
+};
 
 /// Safe build information exposed by diagnostics and health adapters.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

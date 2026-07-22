@@ -60,3 +60,5 @@ opaque_id!(SecretId);
 opaque_id!(PrincipalId);
 opaque_id!(RequestId);
 opaque_id!(ObjectId);
+opaque_id!(AuditEventId);
+opaque_id!(MaintenanceJobId);

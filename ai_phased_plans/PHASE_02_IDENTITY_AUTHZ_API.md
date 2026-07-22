@@ -1,6 +1,6 @@
 # Phase 2: identity, authorization, and API
 
-Status: **Planned**
+Status: **Active implementation phase**
 
 ## Objective
 

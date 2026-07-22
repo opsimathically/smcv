@@ -3,14 +3,35 @@
 #![cfg_attr(test, allow(clippy::panic))]
 
 use std::{
+    fs::{self, OpenOptions},
     path::{Path, PathBuf},
     sync::{Mutex, MutexGuard},
     time::Duration,
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
 use rusqlite::{Connection, OpenFlags, OptionalExtension, backup::Backup, limits::Limit, params};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+
+mod records;
+mod rotation;
+mod vault;
+
+pub use records::{
+    AuditHead, AuditRecord, EncryptedRecord, NamespaceInsert, NamespaceRecord, ScheduledSecret,
+    SecretInsert, SecretLifecycleChange, SecretPurge, SecretRecord, SecretVersionInsert,
+    StoredAuditRecord,
+};
+pub use rotation::{
+    KekRotationJob, RewrapItem, RewrapKind, RewrappedItem, RootRewrappedKey, RotationStage,
+};
+pub use vault::{
+    ActivationState, BootstrapRecord, InitializationDisposition, InstallationRecord, KeyKind,
+    KeyState, RegisteredKey, WrappedKeyRecord,
+};
 
 const APPLICATION_ID: i32 = 0x534d_4356;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -31,6 +52,21 @@ pub enum StorageError {
     /// An applied migration has different content than this binary expects.
     #[error("database migration history does not match this build")]
     MigrationMismatch,
+    /// Durable state conflicts with the requested state-machine transition.
+    #[error("vault state conflicts with the requested operation")]
+    StateConflict,
+    /// A required durable record is absent.
+    #[error("vault is not initialized")]
+    NotInitialized,
+    /// Durable data violates an internal fixed-width invariant.
+    #[error("database contains invalid protected metadata")]
+    InvalidData,
+    /// A database or snapshot path is not a restrictive regular file.
+    #[error("database path permissions are invalid")]
+    UnsafePath,
+    /// An optimistic concurrency or uniqueness precondition failed.
+    #[error("database write conflicts with current state")]
+    Conflict,
 }
 
 impl From<rusqlite::Error> for StorageError {
@@ -70,9 +106,8 @@ impl SqliteStore {
     /// migrated.
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
         let path = path.as_ref();
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
-            | OpenFlags::SQLITE_OPEN_CREATE
-            | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
+        prepare_database_file(path)?;
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
         let connection = Connection::open_with_flags(path, flags)?;
         configure(&connection)?;
 
@@ -119,12 +154,13 @@ impl SqliteStore {
     /// completed.
     pub fn backup_to(&self, destination: impl AsRef<Path>) -> StorageResult<()> {
         let destination = destination.as_ref();
-        if destination.exists() {
-            return Err(StorageError::DestinationExists);
-        }
+        create_restrictive_file(destination, true)?;
 
         let source = self.lock()?;
-        let mut target = Connection::open(destination)?;
+        let mut target = Connection::open_with_flags(
+            destination,
+            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+        )?;
         let backup = Backup::new(&source, &mut target)?;
         backup.run_to_completion(32, Duration::from_millis(10), None)?;
         Ok(())
@@ -133,6 +169,71 @@ impl SqliteStore {
     fn lock(&self) -> StorageResult<MutexGuard<'_, Connection>> {
         self.connection.lock().map_err(|_| StorageError::Poisoned)
     }
+}
+
+#[cfg(unix)]
+fn prepare_database_file(path: &Path) -> StorageResult<()> {
+    match fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            if !metadata.file_type().is_file() || metadata.permissions().mode() & 0o077 != 0 {
+                return Err(StorageError::UnsafePath);
+            }
+            Ok(())
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            create_restrictive_file(path, false)
+        }
+        Err(error) => Err(StorageError::Sqlite(
+            rusqlite::Error::ToSqlConversionFailure(error.into()),
+        )),
+    }
+}
+
+#[cfg(not(unix))]
+fn prepare_database_file(path: &Path) -> StorageResult<()> {
+    create_restrictive_file(path, false)
+}
+
+#[cfg(unix)]
+fn create_restrictive_file(path: &Path, destination_semantics: bool) -> StorageResult<()> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true).mode(0o600);
+    match options.open(path) {
+        Ok(file) => sync_new_file_and_parent(&file, path),
+        Err(error)
+            if destination_semantics && error.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            Err(StorageError::DestinationExists)
+        }
+        Err(error) => Err(io_as_storage(error)),
+    }
+}
+
+#[cfg(not(unix))]
+fn create_restrictive_file(path: &Path, destination_semantics: bool) -> StorageResult<()> {
+    let mut options = OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    match options.open(path) {
+        Ok(file) => sync_new_file_and_parent(&file, path),
+        Err(error)
+            if destination_semantics && error.kind() == std::io::ErrorKind::AlreadyExists =>
+        {
+            Err(StorageError::DestinationExists)
+        }
+        Err(error) => Err(io_as_storage(error)),
+    }
+}
+
+fn sync_new_file_and_parent(file: &fs::File, path: &Path) -> StorageResult<()> {
+    file.sync_all().map_err(io_as_storage)?;
+    let parent = path.parent().ok_or(StorageError::UnsafePath)?;
+    fs::File::open(parent)
+        .and_then(|directory| directory.sync_all())
+        .map_err(io_as_storage)
+}
+
+fn io_as_storage(error: std::io::Error) -> StorageError {
+    StorageError::Sqlite(rusqlite::Error::ToSqlConversionFailure(error.into()))
 }
 
 fn configure(connection: &Connection) -> StorageResult<()> {
@@ -162,17 +263,222 @@ struct Migration {
     sql: &'static str,
 }
 
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    checksum: "sha256:e279f6be347da07e482e11884680b3e7f249acb9e9c1a4a5b8244c11e2c8ff44",
-    sql: "CREATE TABLE smcv_installation_state (\
-              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
-              logical_vault_id BLOB NOT NULL CHECK (length(logical_vault_id) = 16),\
-              installation_id BLOB NOT NULL CHECK (length(installation_id) = 16),\
-              recovery_epoch INTEGER NOT NULL CHECK (recovery_epoch >= 0),\
-              initialized_at_unix_ms INTEGER NOT NULL\
-          ) STRICT;",
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        checksum: "sha256:e279f6be347da07e482e11884680b3e7f249acb9e9c1a4a5b8244c11e2c8ff44",
+        sql: "CREATE TABLE smcv_installation_state (\
+                  singleton INTEGER PRIMARY KEY CHECK (singleton = 1),\
+                  logical_vault_id BLOB NOT NULL CHECK (length(logical_vault_id) = 16),\
+                  installation_id BLOB NOT NULL CHECK (length(installation_id) = 16),\
+                  recovery_epoch INTEGER NOT NULL CHECK (recovery_epoch >= 0),\
+                  initialized_at_unix_ms INTEGER NOT NULL\
+              ) STRICT;",
+    },
+    Migration {
+        version: 2,
+        checksum: "sha256:5f5638c43abb9744e53871ea50587c580186bcc7e3e96076eb4c537b2e5986da",
+        sql: r"
+ALTER TABLE smcv_installation_state
+    ADD COLUMN activation_state TEXT NOT NULL DEFAULT 'initializing'
+    CHECK (activation_state IN ('initializing', 'ready', 'maintenance', 'failed'));
+ALTER TABLE smcv_installation_state
+    ADD COLUMN active_kek_version INTEGER CHECK (active_kek_version > 0);
+ALTER TABLE smcv_installation_state
+    ADD COLUMN security_semantics_version INTEGER NOT NULL DEFAULT 1
+    CHECK (security_semantics_version = 1);
+
+CREATE TABLE smcv_key_registry (
+    key_kind TEXT NOT NULL CHECK (key_kind IN ('kek', 'blind_index', 'audit', 'token_verifier')),
+    key_version INTEGER NOT NULL CHECK (key_version > 0),
+    object_id BLOB NOT NULL CHECK (length(object_id) = 16),
+    wrapping_kek_version INTEGER CHECK (wrapping_kek_version > 0),
+    nonce BLOB NOT NULL CHECK (length(nonce) = 24),
+    wrapped_key BLOB NOT NULL CHECK (length(wrapped_key) = 48),
+    state TEXT NOT NULL CHECK (state IN ('active', 'retiring', 'retired')),
+    created_at_unix_ms INTEGER NOT NULL,
+    PRIMARY KEY (key_kind, key_version)
+) STRICT;
+CREATE UNIQUE INDEX smcv_one_active_key_per_kind
+    ON smcv_key_registry(key_kind) WHERE state = 'active';
+
+CREATE TABLE smcv_namespaces (
+    namespace_id BLOB PRIMARY KEY CHECK (length(namespace_id) = 16),
+    parent_namespace_id BLOB REFERENCES smcv_namespaces(namespace_id) ON DELETE RESTRICT,
+    name_index BLOB NOT NULL CHECK (length(name_index) = 32),
+    metadata_version INTEGER NOT NULL CHECK (metadata_version > 0),
+    metadata_nonce BLOB NOT NULL CHECK (length(metadata_nonce) = 24),
+    metadata_ciphertext BLOB NOT NULL CHECK (length(metadata_ciphertext) BETWEEN 16 AND 1048592),
+    dek_nonce BLOB NOT NULL CHECK (length(dek_nonce) = 24),
+    wrapped_dek BLOB NOT NULL CHECK (length(wrapped_dek) = 48),
+    kek_version INTEGER NOT NULL CHECK (kek_version > 0),
+    lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('active', 'archived', 'deleted')),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    state_commitment BLOB NOT NULL CHECK (length(state_commitment) = 32),
+    created_at_unix_ms INTEGER NOT NULL,
+    updated_at_unix_ms INTEGER NOT NULL,
+    UNIQUE (parent_namespace_id, name_index)
+) STRICT;
+CREATE UNIQUE INDEX smcv_namespaces_unique_root_name
+    ON smcv_namespaces(name_index) WHERE parent_namespace_id IS NULL;
+
+CREATE TABLE smcv_secrets (
+    secret_id BLOB PRIMARY KEY CHECK (length(secret_id) = 16),
+    namespace_id BLOB NOT NULL REFERENCES smcv_namespaces(namespace_id) ON DELETE RESTRICT,
+    name_index BLOB NOT NULL CHECK (length(name_index) = 32),
+    metadata_version INTEGER NOT NULL CHECK (metadata_version > 0),
+    metadata_nonce BLOB NOT NULL CHECK (length(metadata_nonce) = 24),
+    metadata_ciphertext BLOB NOT NULL CHECK (length(metadata_ciphertext) BETWEEN 16 AND 1048592),
+    metadata_dek_nonce BLOB NOT NULL CHECK (length(metadata_dek_nonce) = 24),
+    metadata_wrapped_dek BLOB NOT NULL CHECK (length(metadata_wrapped_dek) = 48),
+    metadata_kek_version INTEGER NOT NULL CHECK (metadata_kek_version > 0),
+    lifecycle_state TEXT NOT NULL CHECK (lifecycle_state IN ('active', 'archived', 'deleted', 'purged')),
+    current_version INTEGER NOT NULL CHECK (current_version > 0),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    state_commitment BLOB NOT NULL CHECK (length(state_commitment) = 32),
+    created_at_unix_ms INTEGER NOT NULL,
+    updated_at_unix_ms INTEGER NOT NULL,
+    deleted_at_unix_ms INTEGER,
+    UNIQUE (namespace_id, name_index),
+    FOREIGN KEY (secret_id, current_version)
+        REFERENCES smcv_secret_versions(secret_id, version)
+        DEFERRABLE INITIALLY DEFERRED
+) STRICT;
+
+CREATE TABLE smcv_secret_versions (
+    secret_id BLOB NOT NULL REFERENCES smcv_secrets(secret_id) ON DELETE RESTRICT,
+    version INTEGER NOT NULL CHECK (version > 0),
+    envelope_version INTEGER NOT NULL CHECK (envelope_version = 1),
+    algorithm_suite INTEGER NOT NULL CHECK (algorithm_suite = 1),
+    kek_version INTEGER NOT NULL CHECK (kek_version > 0),
+    payload_nonce BLOB NOT NULL CHECK (length(payload_nonce) = 24),
+    payload_ciphertext BLOB NOT NULL CHECK (length(payload_ciphertext) BETWEEN 16 AND 16777216),
+    dek_nonce BLOB NOT NULL CHECK (length(dek_nonce) = 24),
+    wrapped_dek BLOB NOT NULL CHECK (length(wrapped_dek) = 48),
+    expires_at_unix_ms INTEGER CHECK (expires_at_unix_ms IS NULL OR expires_at_unix_ms >= 0),
+    rotation_due_at_unix_ms INTEGER CHECK (rotation_due_at_unix_ms IS NULL OR rotation_due_at_unix_ms >= 0),
+    created_by_principal_id BLOB CHECK (created_by_principal_id IS NULL OR length(created_by_principal_id) = 16),
+    created_at_unix_ms INTEGER NOT NULL,
+    PRIMARY KEY (secret_id, version)
+) STRICT;
+CREATE INDEX smcv_secret_versions_expiration_due
+    ON smcv_secret_versions(expires_at_unix_ms)
+    WHERE expires_at_unix_ms IS NOT NULL;
+CREATE INDEX smcv_secret_versions_rotation_due
+    ON smcv_secret_versions(rotation_due_at_unix_ms)
+    WHERE rotation_due_at_unix_ms IS NOT NULL;
+
+CREATE TABLE smcv_secret_tombstones (
+    secret_id BLOB PRIMARY KEY CHECK (length(secret_id) = 16),
+    namespace_id BLOB NOT NULL CHECK (length(namespace_id) = 16),
+    name_index BLOB NOT NULL CHECK (length(name_index) = 32),
+    last_version INTEGER NOT NULL CHECK (last_version > 0),
+    purged_at_unix_ms INTEGER NOT NULL,
+    retention_cutoff_unix_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE smcv_audit_events (
+    sequence INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id BLOB NOT NULL UNIQUE CHECK (length(event_id) = 16),
+    installation_id BLOB NOT NULL CHECK (length(installation_id) = 16),
+    recovery_epoch INTEGER NOT NULL CHECK (recovery_epoch >= 0),
+    occurred_at_unix_ms INTEGER NOT NULL,
+    request_id BLOB NOT NULL CHECK (length(request_id) = 16),
+    actor_principal_id BLOB CHECK (actor_principal_id IS NULL OR length(actor_principal_id) = 16),
+    action TEXT NOT NULL CHECK (length(action) BETWEEN 1 AND 64),
+    target_kind TEXT NOT NULL CHECK (length(target_kind) BETWEEN 1 AND 32),
+    target_id BLOB CHECK (target_id IS NULL OR length(target_id) = 16),
+    outcome TEXT NOT NULL CHECK (outcome IN ('allowed', 'denied', 'failed')),
+    previous_commitment BLOB NOT NULL CHECK (length(previous_commitment) = 32),
+    commitment BLOB NOT NULL CHECK (length(commitment) = 32)
+) STRICT;
+
+CREATE TABLE smcv_maintenance_jobs (
+    job_id BLOB PRIMARY KEY CHECK (length(job_id) = 16),
+    job_kind TEXT NOT NULL CHECK (job_kind IN ('kek_rotation', 'root_rotation', 'audit_verify')),
+    state TEXT NOT NULL CHECK (state IN ('pending', 'running', 'paused', 'completed', 'failed')),
+    source_key_version INTEGER,
+    target_key_version INTEGER,
+    stage TEXT CHECK (stage IS NULL OR stage IN ('auxiliary', 'namespace_metadata', 'secret_metadata', 'secret_versions', 'finalize')),
+    last_row_id INTEGER NOT NULL DEFAULT 0 CHECK (last_row_id >= 0),
+    last_object_id BLOB CHECK (last_object_id IS NULL OR length(last_object_id) = 16),
+    lease_owner BLOB CHECK (lease_owner IS NULL OR length(lease_owner) = 16),
+    lease_expires_at_unix_ms INTEGER,
+    updated_at_unix_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE smcv_mutation_guard (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    purge_enabled INTEGER NOT NULL CHECK (purge_enabled IN (0, 1))
+) STRICT;
+INSERT INTO smcv_mutation_guard(singleton, purge_enabled) VALUES (1, 0);
+
+CREATE TRIGGER smcv_secret_versions_protect_update
+BEFORE UPDATE ON smcv_secret_versions
+WHEN OLD.secret_id != NEW.secret_id
+  OR OLD.version != NEW.version
+  OR OLD.envelope_version != NEW.envelope_version
+  OR OLD.algorithm_suite != NEW.algorithm_suite
+  OR OLD.payload_nonce != NEW.payload_nonce
+  OR OLD.payload_ciphertext != NEW.payload_ciphertext
+  OR OLD.expires_at_unix_ms IS NOT NEW.expires_at_unix_ms
+  OR OLD.rotation_due_at_unix_ms IS NOT NEW.rotation_due_at_unix_ms
+  OR OLD.created_by_principal_id IS NOT NEW.created_by_principal_id
+  OR OLD.created_at_unix_ms != NEW.created_at_unix_ms
+BEGIN
+    SELECT RAISE(ABORT, 'immutable secret version');
+END;
+
+CREATE TRIGGER smcv_secret_versions_protect_delete
+BEFORE DELETE ON smcv_secret_versions
+WHEN (SELECT purge_enabled FROM smcv_mutation_guard WHERE singleton = 1) != 1
+BEGIN
+    SELECT RAISE(ABORT, 'explicit purge required');
+END;
+
+CREATE TRIGGER smcv_secrets_protect_delete
+BEFORE DELETE ON smcv_secrets
+WHEN (SELECT purge_enabled FROM smcv_mutation_guard WHERE singleton = 1) != 1
+BEGIN
+    SELECT RAISE(ABORT, 'explicit purge required');
+END;
+
+CREATE TRIGGER smcv_secrets_monotonic_versions
+BEFORE UPDATE ON smcv_secrets
+WHEN NEW.current_version < OLD.current_version
+  OR NEW.metadata_version < OLD.metadata_version
+  OR (
+      NEW.revision <= OLD.revision
+      AND (
+          NEW.namespace_id != OLD.namespace_id
+          OR NEW.name_index != OLD.name_index
+          OR NEW.metadata_version != OLD.metadata_version
+          OR NEW.metadata_nonce != OLD.metadata_nonce
+          OR NEW.metadata_ciphertext != OLD.metadata_ciphertext
+          OR NEW.lifecycle_state != OLD.lifecycle_state
+          OR NEW.current_version != OLD.current_version
+          OR NEW.updated_at_unix_ms != OLD.updated_at_unix_ms
+          OR NEW.deleted_at_unix_ms IS NOT OLD.deleted_at_unix_ms
+      )
+  )
+BEGIN
+    SELECT RAISE(ABORT, 'secret versions and revision must advance');
+END;
+
+CREATE TRIGGER smcv_audit_events_protect_update
+BEFORE UPDATE ON smcv_audit_events
+BEGIN
+    SELECT RAISE(ABORT, 'audit events are append-only');
+END;
+
+CREATE TRIGGER smcv_audit_events_protect_delete
+BEFORE DELETE ON smcv_audit_events
+BEGIN
+    SELECT RAISE(ABORT, 'audit events are append-only');
+END;
+",
+    },
+];
 
 fn apply_migrations(connection: &Connection) -> StorageResult<()> {
     for migration in MIGRATIONS {
@@ -221,7 +527,18 @@ fn read_settings(connection: &Connection) -> StorageResult<SqliteSettings> {
 
 #[cfg(test)]
 mod tests {
-    use rusqlite::Connection;
+    use std::{
+        fs::OpenOptions,
+        io::{Seek, SeekFrom, Write},
+        sync::Arc,
+        thread,
+        time::Duration,
+    };
+
+    #[cfg(unix)]
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    use rusqlite::{Connection, ErrorCode};
     use tempfile::TempDir;
 
     use super::{APPLICATION_ID, MIGRATIONS, SqliteStore, StorageError, migration_checksum};
@@ -245,6 +562,209 @@ mod tests {
                 .quick_integrity_check()
                 .unwrap_or_else(|error| panic!("integrity check must run: {error}"))
         );
+    }
+
+    #[test]
+    fn migrates_the_frozen_phase_zero_schema_fixture_forward() {
+        let directory = TempDir::new()
+            .unwrap_or_else(|error| panic!("synthetic temp directory must open: {error}"));
+        let path = directory.path().join("phase-zero.sqlite");
+        let connection = Connection::open(&path)
+            .unwrap_or_else(|error| panic!("fixture database must open: {error}"));
+        connection
+            .execute_batch(
+                "CREATE TABLE smcv_schema_migrations (
+                     version INTEGER PRIMARY KEY,
+                     checksum TEXT NOT NULL,
+                     applied_at_unix_ms INTEGER NOT NULL
+                 ) STRICT;",
+            )
+            .unwrap_or_else(|error| panic!("fixture migration table must create: {error}"));
+        connection
+            .execute_batch(MIGRATIONS[0].sql)
+            .unwrap_or_else(|error| panic!("frozen v1 schema must apply: {error}"));
+        connection
+            .execute(
+                "INSERT INTO smcv_schema_migrations VALUES (1, ?1, 0)",
+                [MIGRATIONS[0].checksum],
+            )
+            .unwrap_or_else(|error| panic!("fixture history must record: {error}"));
+        connection
+            .pragma_update(None, "user_version", 1)
+            .unwrap_or_else(|error| panic!("fixture version must record: {error}"));
+        drop(connection);
+        #[cfg(unix)]
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|error| panic!("fixture permissions must restrict: {error}"));
+
+        let store = SqliteStore::open(&path)
+            .unwrap_or_else(|error| panic!("fixture must migrate: {error}"));
+        let connection = store
+            .lock()
+            .unwrap_or_else(|error| panic!("migrated fixture must lock: {error}"));
+        let version: i64 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap_or_else(|error| panic!("migrated version must read: {error}"));
+        let tables: i64 = connection
+            .query_row(
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('smcv_key_registry', 'smcv_secrets', 'smcv_audit_events')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_else(|error| panic!("migrated tables must inspect: {error}"));
+        assert_eq!(version, 2);
+        assert_eq!(tables, 3);
+    }
+
+    #[test]
+    fn busy_writer_waits_within_bound_and_then_commits() {
+        let directory = TempDir::new()
+            .unwrap_or_else(|error| panic!("synthetic temp directory must open: {error}"));
+        let path = directory.path().join("busy.sqlite");
+        let store = Arc::new(
+            SqliteStore::open(&path)
+                .unwrap_or_else(|error| panic!("synthetic database must open: {error}")),
+        );
+        store
+            .lock()
+            .unwrap_or_else(|error| panic!("database must lock: {error}"))
+            .execute("CREATE TABLE smcv_busy_probe(value INTEGER) STRICT", [])
+            .unwrap_or_else(|error| panic!("probe table must create: {error}"));
+        let blocker = Connection::open(&path)
+            .unwrap_or_else(|error| panic!("blocking connection must open: {error}"));
+        blocker
+            .execute_batch("BEGIN IMMEDIATE; INSERT INTO smcv_busy_probe VALUES (1);")
+            .unwrap_or_else(|error| panic!("blocking write must begin: {error}"));
+        let writer = Arc::clone(&store);
+        let handle = thread::spawn(move || {
+            writer.lock().is_ok_and(|connection| {
+                connection
+                    .execute("INSERT INTO smcv_busy_probe VALUES (2)", [])
+                    .is_ok()
+            })
+        });
+        thread::sleep(Duration::from_millis(50));
+        blocker
+            .execute_batch("COMMIT")
+            .unwrap_or_else(|error| panic!("blocking write must commit: {error}"));
+        assert!(
+            handle
+                .join()
+                .unwrap_or_else(|_| panic!("bounded writer thread must join"))
+        );
+        let count: i64 = store
+            .lock()
+            .unwrap_or_else(|error| panic!("database must relock: {error}"))
+            .query_row("SELECT count(*) FROM smcv_busy_probe", [], |row| row.get(0))
+            .unwrap_or_else(|error| panic!("probe rows must count: {error}"));
+        assert_eq!(count, 2);
+    }
+
+    #[test]
+    fn disk_full_rolls_back_the_entire_transaction() {
+        let directory = TempDir::new()
+            .unwrap_or_else(|error| panic!("synthetic temp directory must open: {error}"));
+        let store = SqliteStore::open(directory.path().join("full.sqlite"))
+            .unwrap_or_else(|error| panic!("synthetic database must open: {error}"));
+        let connection = store
+            .lock()
+            .unwrap_or_else(|error| panic!("database must lock: {error}"));
+        connection
+            .execute("CREATE TABLE smcv_full_probe(value BLOB) STRICT", [])
+            .unwrap_or_else(|error| panic!("probe table must create: {error}"));
+        let page_count: i64 = connection
+            .pragma_query_value(None, "page_count", |row| row.get(0))
+            .unwrap_or_else(|error| panic!("page count must read: {error}"));
+        connection
+            .pragma_update(None, "max_page_count", page_count.saturating_add(1))
+            .unwrap_or_else(|error| panic!("page cap must set: {error}"));
+        let transaction = connection
+            .unchecked_transaction()
+            .unwrap_or_else(|error| panic!("probe transaction must begin: {error}"));
+        let Err(error) =
+            transaction.execute("INSERT INTO smcv_full_probe VALUES (zeroblob(1048576))", [])
+        else {
+            panic!("bounded database must report full");
+        };
+        assert!(matches!(
+            error,
+            rusqlite::Error::SqliteFailure(code, _) if code.code == ErrorCode::DiskFull
+        ));
+        drop(transaction);
+        let count: i64 = connection
+            .query_row("SELECT count(*) FROM smcv_full_probe", [], |row| row.get(0))
+            .unwrap_or_else(|error| panic!("rolled-back rows must count: {error}"));
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn database_page_corruption_never_reports_healthy() {
+        let directory = TempDir::new()
+            .unwrap_or_else(|error| panic!("synthetic temp directory must open: {error}"));
+        let path = directory.path().join("corrupt.sqlite");
+        let store = SqliteStore::open(&path)
+            .unwrap_or_else(|error| panic!("synthetic database must open: {error}"));
+        drop(store);
+        let mut file = OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap_or_else(|error| panic!("synthetic database bytes must open: {error}"));
+        file.seek(SeekFrom::Start(100))
+            .and_then(|_| file.write_all(&[0xff; 32]))
+            .and_then(|()| file.sync_all())
+            .unwrap_or_else(|error| panic!("synthetic corruption must persist: {error}"));
+        drop(file);
+
+        let rejected = match SqliteStore::open(&path) {
+            Ok(store) => !store.quick_integrity_check().unwrap_or(false),
+            Err(error) => {
+                assert!(!error.to_string().contains(path.to_string_lossy().as_ref()));
+                true
+            }
+        };
+        assert!(rejected);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn database_and_snapshot_files_are_restrictive_and_unsafe_files_fail_closed() {
+        let directory = TempDir::new()
+            .unwrap_or_else(|error| panic!("synthetic temp directory must open: {error}"));
+        let database = directory.path().join("restricted.sqlite");
+        let snapshot = directory.path().join("restricted.snapshot.sqlite");
+        let store = SqliteStore::open(&database)
+            .unwrap_or_else(|error| panic!("restricted database must open: {error}"));
+        assert_eq!(
+            std::fs::metadata(&database)
+                .unwrap_or_else(|error| panic!("database metadata must read: {error}"))
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        store
+            .backup_to(&snapshot)
+            .unwrap_or_else(|error| panic!("restricted snapshot must create: {error}"));
+        assert_eq!(
+            std::fs::metadata(&snapshot)
+                .unwrap_or_else(|error| panic!("snapshot metadata must read: {error}"))
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+
+        let unsafe_path = directory.path().join("unsafe.sqlite");
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o644)
+            .open(&unsafe_path)
+            .unwrap_or_else(|error| panic!("unsafe fixture must create: {error}"));
+        assert!(matches!(
+            SqliteStore::open(&unsafe_path),
+            Err(StorageError::UnsafePath)
+        ));
     }
 
     #[test]
@@ -337,9 +857,8 @@ mod tests {
 
     #[test]
     fn compiled_migration_checksum_is_current() {
-        assert_eq!(
-            migration_checksum(MIGRATIONS[0].sql),
-            MIGRATIONS[0].checksum
-        );
+        for migration in MIGRATIONS {
+            assert_eq!(migration_checksum(migration.sql), migration.checksum);
+        }
     }
 }
