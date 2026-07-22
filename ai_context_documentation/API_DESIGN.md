@@ -1,6 +1,6 @@
 # API design
 
-Status: **Committed protocol properties; proposed resource shape**
+Status: **Committed Phase 2 API; backup/restore additions active in Phase 3**
 Last reviewed: 2026-07-21
 
 ## General contract
@@ -19,9 +19,10 @@ server-side session cookie plus CSRF protection. Application endpoints use an
 `Authorization: Bearer` credential. Bearer credentials are never accepted in
 query parameters or request paths.
 
-## Proposed resource endpoints
+## Committed Phase 2 resource endpoints
 
-Exact route names are validated during Phase 2, but the contract must support:
+The checked OpenAPI 3.1 document at `/api/v1/openapi.json` and its runtime
+conformance test commit these route families:
 
 | Capability | Proposed route family |
 |---|---|
@@ -30,11 +31,16 @@ Exact route names are validated during Phase 2, but the contract must support:
 | Explicit plaintext reveal | `/api/v1/secrets/{id}/value` |
 | Service identities | `/api/v1/service-identities` |
 | Application credentials | `/api/v1/service-identities/{id}/credentials` |
-| Policies and effective access | `/api/v1/policies`, `/api/v1/effective-access` |
+| Policies and effective access | `/api/v1/policies`, `/api/v1/service-identities/{id}/effective-access` |
 | Audit events | `/api/v1/audit-events` |
 | Backup creation and safe metadata | `/api/v1/backups` |
 | Restore staging/status | `/api/v1/restores` |
 | Session and recent authentication | `/api/v1/session` |
+
+Phase 2 also commits explicit archive/restore, namespace move-impact and
+confirmed-move, immutable historical value, passkey ceremony, credential
+revocation, and OpenAPI subresources. Phase 3 adds backup and restore routes
+only after their format and recovery authority pass the portable-recovery gate.
 
 High-risk operations use action-shaped subresources when ordinary CRUD would
 hide important semantics, such as reveal, revoke, verify, or restore.
@@ -88,11 +94,12 @@ codes.
 
 ## Pagination and filtering
 
-Cursor pagination uses opaque, authenticated cursors with bounded page sizes.
-Cursors include policy or query context so they cannot be replayed to broaden
-access. Filters use an allowlist and never become raw SQL fragments. Protected
-metadata search is limited by the blind-index leakage decision in the crypto
-document.
+Phase 2 uses stable exclusive opaque record IDs or monotonic safe sequence
+numbers as bounded cursors. Cursor use is authorized again against the current
+principal and resource, so a cursor never carries authority. Future compound
+filter cursors must be authenticated and include policy/query context. Filters
+use an allowlist and never become raw SQL fragments. Protected metadata search
+is limited by the blind-index leakage decision in the crypto document.
 
 ## Rate and resource limits
 
@@ -105,9 +112,13 @@ Separate limits apply to:
 - Password hashing and archive KDF work.
 - Backup/import size, record count, chunk size, and concurrent jobs.
 
-Limits combine per-source and per-principal controls without trusting proxy
-headers unless the proxy boundary is configured. Expensive work uses bounded
-queues and returns a safe unavailable/rate-limit response when saturated.
+Phase 2 derives source limits from the TCP peer rather than forwarding headers:
+password attempts are limited to 10 per peer per minute, bearer requests to
+120, tracked source cardinality to 4,096, password work to four concurrent
+Argon2id jobs, all requests to 128 concurrent operations, headers to 64/32 KiB,
+bodies to 1 MiB, and request time to 15 seconds. Phase 5 calibrates production
+limits and proxy deployment rules. Saturation returns a safe rate-limit or
+timeout response.
 
 ## Browser security
 
@@ -124,9 +135,8 @@ queues and returns a safe unavailable/rate-limit response when saturated.
 
 Each request has one correlation ID. Domain operations may generate multiple
 audit events, but every protected decision is attributable to the request,
-principal, and credential. Access logs record route templates and status—not
-raw paths where user-controlled identifiers, headers, query strings, or bodies
-could leak data.
+principal, and credential. Phase 2 access spans record method plus matched route
+template only—not raw paths, identifiers, headers, query strings, or bodies.
 
 ## Compatibility
 

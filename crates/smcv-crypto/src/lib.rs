@@ -33,6 +33,10 @@ pub const ENVELOPE_VERSION: u16 = 1;
 pub const TOKEN_SECRET_LENGTH: usize = 32;
 /// Non-secret lookup material in an application credential.
 pub const TOKEN_LOOKUP_LENGTH: usize = 12;
+/// Non-secret lookup material in a browser session token.
+pub const SESSION_LOOKUP_LENGTH: usize = 16;
+/// Random secret material in browser session and CSRF tokens.
+pub const SESSION_SECRET_LENGTH: usize = 32;
 /// Length of a version 1 local root-key file.
 pub const ROOT_KEY_FILE_LENGTH: usize = 72;
 
@@ -86,6 +90,14 @@ pub enum ObjectKind {
     NamespaceMetadata = 9,
     /// A namespace metadata DEK wrapped by a vault KEK.
     WrappedNamespaceMetadataKey = 10,
+    /// Protected service-identity metadata.
+    ServiceIdentityMetadata = 11,
+    /// Service-identity metadata DEK wrapped by a vault KEK.
+    WrappedServiceIdentityMetadataKey = 12,
+    /// Protected policy display metadata.
+    PolicyMetadata = 13,
+    /// Policy metadata DEK wrapped by a vault KEK.
+    WrappedPolicyMetadataKey = 14,
 }
 
 /// Stable context authenticated with an encrypted record.
@@ -304,6 +316,29 @@ impl TokenVerifier {
     }
 }
 
+/// Constant-time browser session or CSRF verifier stored by the server.
+pub struct SessionVerifier([u8; 32]);
+
+impl SessionVerifier {
+    /// Imports a verifier from its fixed-width durable representation.
+    #[must_use]
+    pub const fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    /// Returns the fixed-width durable verifier representation.
+    #[must_use]
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for SessionVerifier {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("SessionVerifier([REDACTED])")
+    }
+}
+
 /// Keyed exact-match index that reveals no human-readable name.
 #[derive(Clone, Copy, Eq, PartialEq)]
 pub struct BlindIndex([u8; 32]);
@@ -324,6 +359,8 @@ impl BlindIndex {
 
 /// Canonical safe fields committed into one append-oriented audit event.
 pub struct AuditCommitmentInput<'a> {
+    /// Canonical audit commitment format version.
+    pub commitment_version: u8,
     /// Previous event commitment, or zeros for the first local event.
     pub previous: [u8; 32],
     /// Monotonic local event sequence.
@@ -340,6 +377,10 @@ pub struct AuditCommitmentInput<'a> {
     pub request_id: RequestId,
     /// Acting principal when one exists.
     pub actor_principal_id: Option<PrincipalId>,
+    /// Authentication context category for version 2 events.
+    pub credential_kind: Option<&'a str>,
+    /// Session or application-credential reference for version 2 events.
+    pub credential_id: Option<ObjectId>,
     /// Closed action vocabulary.
     pub action: &'a str,
     /// Closed target-kind vocabulary.
@@ -437,9 +478,24 @@ pub fn audit_commitment(
     let action_length = bounded_audit_text(input.action, 64)?;
     let kind_length = bounded_audit_text(input.target_kind, 32)?;
     let outcome_length = bounded_audit_text(input.outcome, 16)?;
+    if !matches!(input.commitment_version, 1 | 2)
+        || (input.commitment_version == 1
+            && (input.credential_kind.is_some() || input.credential_id.is_some()))
+        || input.credential_kind.is_some() != input.credential_id.is_some()
+    {
+        return Err(CryptoError::InvalidProtectedInput);
+    }
+    let credential_kind_length = input
+        .credential_kind
+        .map(|value| bounded_audit_text(value, 16))
+        .transpose()?;
     let mut mac = Hmac::<Sha256>::new_from_slice(audit_key.expose())
         .map_err(|_| CryptoError::InvalidProtectedInput)?;
-    mac.update(b"SMCV-AUDIT-COMMITMENT\0v1\0");
+    if input.commitment_version == 1 {
+        mac.update(b"SMCV-AUDIT-COMMITMENT\0v1\0");
+    } else {
+        mac.update(b"SMCV-AUDIT-COMMITMENT\0v2\0");
+    }
     mac.update(&input.previous);
     mac.update(&input.sequence.to_be_bytes());
     mac.update(input.event_id.as_bytes());
@@ -448,6 +504,16 @@ pub fn audit_commitment(
     mac.update(&input.occurred_at_unix_ms.to_be_bytes());
     mac.update(input.request_id.as_bytes());
     update_optional_id(&mut mac, input.actor_principal_id.map(PrincipalId::as_uuid));
+    if input.commitment_version == 2 {
+        if let (Some(kind), Some(length)) = (input.credential_kind, credential_kind_length) {
+            mac.update(&[1]);
+            mac.update(&length.to_be_bytes());
+            mac.update(kind.as_bytes());
+            update_optional_id(&mut mac, input.credential_id.map(ObjectId::as_uuid));
+        } else {
+            mac.update(&[0]);
+        }
+    }
     mac.update(&action_length.to_be_bytes());
     mac.update(input.action.as_bytes());
     mac.update(&kind_length.to_be_bytes());
@@ -531,6 +597,33 @@ pub struct IssuedToken {
     pub verifier: TokenVerifier,
 }
 
+/// Newly generated browser session secrets and their durable verifiers.
+pub struct IssuedSession {
+    /// Complete session cookie value returned only to the browser.
+    pub session_token: ProtectedString,
+    /// Complete double-submit value returned only to the browser.
+    pub csrf_token: ProtectedString,
+    /// Public random lookup used to select the server-side session.
+    pub lookup_id: [u8; SESSION_LOOKUP_LENGTH],
+    /// Keyed session-token verifier.
+    pub session_verifier: SessionVerifier,
+    /// Keyed CSRF-token verifier.
+    pub csrf_verifier: SessionVerifier,
+}
+
+impl fmt::Debug for IssuedSession {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("IssuedSession")
+            .field("session_token", &"[REDACTED]")
+            .field("csrf_token", &"[REDACTED]")
+            .field("lookup_id", &"[PUBLIC RANDOM LOOKUP]")
+            .field("session_verifier", &self.session_verifier)
+            .field("csrf_verifier", &self.csrf_verifier)
+            .finish()
+    }
+}
+
 impl fmt::Debug for IssuedToken {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -564,6 +657,220 @@ pub fn issue_token(verifier_key: &KeyMaterial) -> CryptoResult<IssuedToken> {
         lookup_id,
         verifier,
     })
+}
+
+/// Extracts the bounded public lookup from a candidate application token.
+#[must_use]
+pub fn token_lookup_id(presented: &str) -> Option<[u8; TOKEN_LOOKUP_LENGTH]> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    if presented.len() > 128 {
+        return None;
+    }
+    let encoded = presented.strip_prefix("smcv_v1.")?;
+    let mut fields = encoded.split('.');
+    let lookup = URL_SAFE_NO_PAD.decode(fields.next()?).ok()?;
+    let secret = URL_SAFE_NO_PAD.decode(fields.next()?).ok()?;
+    if fields.next().is_some()
+        || lookup.len() != TOKEN_LOOKUP_LENGTH
+        || secret.len() != TOKEN_SECRET_LENGTH
+    {
+        return None;
+    }
+    lookup.try_into().ok()
+}
+
+/// Produces keyed, non-reversible idempotency-key and request verifiers.
+///
+/// # Errors
+///
+/// Returns invalid input for an empty/oversized key or request and unavailable
+/// verifier construction failure.
+pub fn idempotency_verifiers(
+    verifier_key: &KeyMaterial,
+    key: &ProtectedString,
+    request: &ProtectedBytes,
+) -> CryptoResult<([u8; 32], [u8; 32])> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    if key.expose().is_empty()
+        || key.expose().len() > 128
+        || request.is_empty()
+        || request.len() > 1024 * 1024
+    {
+        return Err(CryptoError::InvalidProtectedInput);
+    }
+    let calculate = |domain: &[u8], value: &[u8]| -> CryptoResult<[u8; 32]> {
+        let mut mac = Hmac::<Sha256>::new_from_slice(verifier_key.expose())
+            .map_err(|_| CryptoError::InvalidProtectedInput)?;
+        mac.update(domain);
+        mac.update(value);
+        let mut output = [0; 32];
+        output.copy_from_slice(&mac.finalize().into_bytes());
+        Ok(output)
+    };
+    Ok((
+        calculate(b"SMCV-IDEMPOTENCY-KEY\0v1\0", key.expose().as_bytes())?,
+        calculate(b"SMCV-IDEMPOTENCY-REQUEST\0v1\0", request.expose())?,
+    ))
+}
+
+/// Creates a fresh server-side browser session and CSRF token pair.
+///
+/// The vault verifier key is used as key-derivation input with independent
+/// domains for application credentials, sessions, and CSRF. Only the keyed
+/// verifiers and public lookup are durable.
+///
+/// # Errors
+///
+/// Returns an error if operating-system randomness or verifier construction
+/// is unavailable.
+pub fn issue_session(verifier_key: &KeyMaterial) -> CryptoResult<IssuedSession> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let mut lookup = [0_u8; SESSION_LOOKUP_LENGTH];
+    let mut session_secret = Zeroizing::new([0_u8; SESSION_SECRET_LENGTH]);
+    let mut csrf_secret = Zeroizing::new([0_u8; SESSION_SECRET_LENGTH]);
+    getrandom::fill(&mut lookup).map_err(|_| CryptoError::Randomness)?;
+    getrandom::fill(session_secret.as_mut()).map_err(|_| CryptoError::Randomness)?;
+    getrandom::fill(csrf_secret.as_mut()).map_err(|_| CryptoError::Randomness)?;
+
+    let lookup_text = URL_SAFE_NO_PAD.encode(lookup);
+    let session_text = Zeroizing::new(URL_SAFE_NO_PAD.encode(session_secret.as_slice()));
+    let csrf_text = Zeroizing::new(URL_SAFE_NO_PAD.encode(csrf_secret.as_slice()));
+    let durable_session_verifier = session_verifier(
+        verifier_key,
+        b"SMCV-SESSION-VERIFIER\0v1\0",
+        &lookup,
+        session_secret.as_slice(),
+    )?;
+    let durable_csrf_verifier = session_verifier(
+        verifier_key,
+        b"SMCV-CSRF-VERIFIER\0v1\0",
+        &lookup,
+        csrf_secret.as_slice(),
+    )?;
+    Ok(IssuedSession {
+        session_token: ProtectedString::new(format!(
+            "smcvs_v1.{lookup_text}.{}",
+            session_text.as_str()
+        )),
+        csrf_token: ProtectedString::new(format!("smcvc_v1.{}", csrf_text.as_str())),
+        lookup_id: lookup,
+        session_verifier: durable_session_verifier,
+        csrf_verifier: durable_csrf_verifier,
+    })
+}
+
+/// Extracts the bounded public lookup from a candidate browser-session token.
+#[must_use]
+pub fn session_lookup_id(presented: &str) -> Option<[u8; SESSION_LOOKUP_LENGTH]> {
+    let (lookup, _secret) = decode_session_token(presented)?;
+    lookup.try_into().ok()
+}
+
+/// Verifies a browser-session token against its selected durable verifier.
+///
+/// # Errors
+///
+/// Returns an error only if keyed verifier construction fails. Malformed and
+/// non-matching credentials return `false`.
+pub fn verify_session(
+    verifier_key: &KeyMaterial,
+    presented: &str,
+    expected_lookup: &[u8; SESSION_LOOKUP_LENGTH],
+    expected_verifier: &SessionVerifier,
+) -> CryptoResult<bool> {
+    use subtle::ConstantTimeEq;
+
+    let Some((lookup, secret)) = decode_session_token(presented) else {
+        return Ok(false);
+    };
+    if lookup.as_slice().ct_eq(expected_lookup).unwrap_u8() != 1 {
+        return Ok(false);
+    }
+    let actual = session_verifier(
+        verifier_key,
+        b"SMCV-SESSION-VERIFIER\0v1\0",
+        &lookup,
+        &secret,
+    )?;
+    Ok(actual.0.ct_eq(&expected_verifier.0).into())
+}
+
+/// Verifies a CSRF token bound to the selected browser session lookup.
+///
+/// # Errors
+///
+/// Returns an error only if keyed verifier construction fails. Malformed and
+/// non-matching credentials return `false`.
+pub fn verify_csrf(
+    verifier_key: &KeyMaterial,
+    presented: &str,
+    expected_lookup: &[u8; SESSION_LOOKUP_LENGTH],
+    expected_verifier: &SessionVerifier,
+) -> CryptoResult<bool> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    use subtle::ConstantTimeEq;
+
+    if presented.len() > 64 {
+        return Ok(false);
+    }
+    let Some(encoded) = presented.strip_prefix("smcvc_v1.") else {
+        return Ok(false);
+    };
+    let Ok(secret) = URL_SAFE_NO_PAD.decode(encoded) else {
+        return Ok(false);
+    };
+    if secret.len() != SESSION_SECRET_LENGTH {
+        return Ok(false);
+    }
+    let actual = session_verifier(
+        verifier_key,
+        b"SMCV-CSRF-VERIFIER\0v1\0",
+        expected_lookup,
+        &secret,
+    )?;
+    Ok(actual.0.ct_eq(&expected_verifier.0).into())
+}
+
+fn decode_session_token(presented: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    if presented.len() > 96 {
+        return None;
+    }
+    let encoded = presented.strip_prefix("smcvs_v1.")?;
+    let mut fields = encoded.split('.');
+    let lookup = URL_SAFE_NO_PAD.decode(fields.next()?).ok()?;
+    let secret = URL_SAFE_NO_PAD.decode(fields.next()?).ok()?;
+    if fields.next().is_some()
+        || lookup.len() != SESSION_LOOKUP_LENGTH
+        || secret.len() != SESSION_SECRET_LENGTH
+    {
+        return None;
+    }
+    Some((lookup, secret))
+}
+
+fn session_verifier(
+    verifier_key: &KeyMaterial,
+    domain: &[u8],
+    lookup: &[u8],
+    secret: &[u8],
+) -> CryptoResult<SessionVerifier> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha256;
+
+    let mut mac = Hmac::<Sha256>::new_from_slice(verifier_key.expose())
+        .map_err(|_| CryptoError::InvalidCredential)?;
+    mac.update(domain);
+    mac.update(lookup);
+    mac.update(secret);
+    let mut verifier = [0_u8; 32];
+    verifier.copy_from_slice(&mac.finalize().into_bytes());
+    Ok(SessionVerifier(verifier))
 }
 
 /// Verifies one bounded application credential against its candidate record.
@@ -724,8 +1031,8 @@ mod tests {
 
     use super::{
         AuditCommitmentInput, CryptoError, KeyMaterial, ObjectKind, RecordContext, SealedRecord,
-        audit_commitment, exact_name_index, issue_token, open, seal_with_nonce, state_commitment,
-        verify_token,
+        audit_commitment, exact_name_index, issue_session, issue_token, open, seal_with_nonce,
+        session_lookup_id, state_commitment, verify_csrf, verify_session, verify_token,
     };
     #[cfg(unix)]
     use super::{create_root_key_file, load_root_key_file};
@@ -822,6 +1129,47 @@ mod tests {
     }
 
     #[test]
+    fn browser_session_and_csrf_are_independent_verifier_only_secrets() {
+        let key = KeyMaterial::new([0x73; 32]);
+        let issued = issue_session(&key)
+            .unwrap_or_else(|error| panic!("synthetic session must issue: {error}"));
+
+        assert_eq!(
+            session_lookup_id(issued.session_token.expose()),
+            Some(issued.lookup_id)
+        );
+        assert!(
+            verify_session(
+                &key,
+                issued.session_token.expose(),
+                &issued.lookup_id,
+                &issued.session_verifier,
+            )
+            .unwrap_or_else(|error| panic!("synthetic session must verify: {error}"))
+        );
+        assert!(
+            verify_csrf(
+                &key,
+                issued.csrf_token.expose(),
+                &issued.lookup_id,
+                &issued.csrf_verifier,
+            )
+            .unwrap_or_else(|error| panic!("synthetic csrf must verify: {error}"))
+        );
+        assert!(
+            !verify_csrf(
+                &key,
+                issued.session_token.expose(),
+                &issued.lookup_id,
+                &issued.csrf_verifier,
+            )
+            .unwrap_or_else(|error| panic!("cross-domain check must complete: {error}"))
+        );
+        assert!(!format!("{issued:?}").contains(issued.session_token.expose()));
+        assert!(!format!("{issued:?}").contains(issued.csrf_token.expose()));
+    }
+
+    #[test]
     fn blind_index_is_nfc_canonical_case_sensitive_and_namespace_scoped() {
         let key = KeyMaterial::new([0x31; 32]);
         let namespace = NamespaceId::random();
@@ -848,6 +1196,7 @@ mod tests {
     fn audit_commitment_links_every_canonical_field() {
         let key = KeyMaterial::new([0x51; 32]);
         let mut input = AuditCommitmentInput {
+            commitment_version: 2,
             previous: [0x11; 32],
             sequence: 7,
             event_id: AuditEventId::random(),
@@ -856,6 +1205,8 @@ mod tests {
             occurred_at_unix_ms: 1_800_000_000_000,
             request_id: RequestId::random(),
             actor_principal_id: None,
+            credential_kind: Some("session"),
+            credential_id: Some(ObjectId::random()),
             action: "secret:create",
             target_kind: "secret",
             target_id: Some(ObjectId::random()),

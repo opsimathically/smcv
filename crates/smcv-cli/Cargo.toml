@@ -7,7 +7,9 @@ publish.workspace = true
 
 [dependencies]
 clap.workspace = true
+rpassword.workspace = true
 smcv-app = { version = "=0.1.0", path = "../smcv-app" }
+smcv-core = { version = "=0.1.0", path = "../smcv-core" }
 
 [lints]
 workspace = true

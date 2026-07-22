@@ -22,18 +22,19 @@ Last reviewed: 2026-07-21
 | D-014 | Phase 6 completes with a production-ready release candidate, assurance report, recovery evidence, and external-review handoff package. Public deployment or publication is a separate owner action and is not an implementation completion gate. | Separates a complete product from external release authority. |
 | D-015 | The owner accepts the residual risk of completing development without a prior independent external security review. External assurance occurs after the application is complete and may drive later iterations. | Explicit owner risk acceptance on 2026-07-21. |
 | D-016 | Personal recovery-key custody testing occurs after complete development. Implementation still proves backup/restore and custody UX using synthetic material and automated clean-environment exercises. | Keeps personal key custody off the implementation critical path without weakening recovery engineering. |
+| D-017 | The declared MSRV is Rust 1.88; the reproducible development toolchain remains Rust 1.94.0. | Phase 2 selected patched `time 0.3.47` for the WebAuthn certificate stack rather than accept RUSTSEC-2026-0009 under the former Rust 1.85 floor. |
 | D-101 | Use a random 256-bit DEK per immutable secret version, wrapped by a versioned KEK. | Limits key/nonce scope and permits KEK rotation by rewrapping rather than re-encrypting values. Validated in Phase 0. |
 | D-102 | Algorithm suite 1 uses XChaCha20-Poly1305 with fresh random 192-bit nonces, 128-bit tags, and fixed-width canonical AAD binding vault, installation, object type, object ID, and version. | Maintained RustCrypto construction, independently checked known-answer vector, and substitution/corruption failure tests. Validated in Phase 0. |
 | D-103 | Encrypt human-readable secret metadata and use namespace-scoped HMAC-SHA-256 exact-match indexes with decrypted collision confirmation. | Phase 1 database/WAL sentinel scans, NFC/case/scope tests, and authenticated metadata format fixture passed. |
+| D-104 | Use passkeys/WebAuthn with required user verification as the preferred owner authenticator, with an Argon2id password fallback. | Phase 2 pins the exact RP ID/origin, keeps one-use ceremony state server-side, bounds pending ceremonies, and uses a 64 MiB, three-iteration Argon2id verifier. |
+| D-105 | Use opaque random application credentials with a public lookup component and keyed verifier stored server-side. | Phase 2 proves display-once issuance, verifier-only persistence, independent expiry/revocation/last-use state, concurrent next-request revocation, and restart persistence. |
+| D-106 | Serve UI and API from one origin with server-side owner sessions in secure HTTP-only cookies and session-bound CSRF tokens. | Phase 2 enforces `__Host-`, Secure, HttpOnly, SameSite=Strict, CSRF on state changes, idle/absolute expiry, recent authentication, and logout revocation. |
 | D-107 | SQLite uses WAL, `synchronous=FULL`, foreign keys, bounded busy handling, trusted schema off, transactional checksummed migrations, and the online backup API. | Phase 0 recovery, rollback, configuration, checksum-drift, and snapshot tests validated the durability baseline. |
 
 ## Proposed: validate in Phase 0 or named phase
 
 | ID | Proposal | Validation gate |
 |---|---|---|
-| D-104 | Use passkeys/WebAuthn as the preferred human authenticator with an Argon2id-protected password recovery or fallback path. | Phase 2 owner-flow and deployment review. |
-| D-105 | Use opaque random application tokens with a public lookup prefix and a keyed verifier stored server-side; the domain-separated vault verifier key is portably reprotected during backup restore. | Phase 2 credential and Phase 3 portability review. |
-| D-106 | Serve the UI and API from one origin and use server-side sessions in secure HTTP-only cookies. | Phase 2 and Phase 4 web threat review. |
 | D-108 | Use chunked authenticated encryption for `.smcvault` payloads with a small authenticated public header. | Phase 3 format review and adversarial parser tests. |
 | D-109 | Preserve imported application credential verifiers and their portable vault-scoped verifier key by default for disaster recovery; offer explicit revocation for migration. | Phase 3 UX and threat review. |
 | D-110 | Preserve logical vault identity across disaster recovery while generating a new installation ID and recovery epoch. | Phase 3 clone, audit, and restore review. |

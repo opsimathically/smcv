@@ -1,6 +1,6 @@
 # Data model
 
-Status: **Committed invariants; proposed logical schema**
+Status: **Committed logical model; Phases 1–2 schema implemented**
 Last reviewed: 2026-07-21
 
 This is a logical model, not a migration. Exact columns and indexes are decided
@@ -34,7 +34,7 @@ and evidenced during implementation.
 Clear metadata is not assumed public. Database and backup access still requires
 filesystem and operational controls.
 
-## Proposed entities
+## Logical entities
 
 ### Vault configuration
 
@@ -96,6 +96,10 @@ explicit deny rules.
 Append-oriented events use a monotonic sequence, event ID, timestamp, actor and
 credential references, action, opaque target, allow/deny result, request ID,
 safe source context, previous event commitment, and current commitment.
+Phase 2's safe source context is the authenticated channel (`session` or
+`application`) plus an opaque credential-record reference; raw bearer/session
+values and network addresses are not persisted. Phase 5 may add a coarse or
+keyed network-source field after retention and privacy review.
 Security events are not cascaded away when principals or resources are deleted.
 Events also identify installation ID and recovery epoch. A restore closes the
 imported segment and begins a new destination segment referencing the archive;

@@ -1,6 +1,6 @@
 # Phase 2: identity, authorization, and API
 
-Status: **Active implementation phase**
+Status: **Passed 2026-07-21; Phase 3 active**
 
 ## Objective
 

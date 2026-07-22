@@ -385,6 +385,8 @@ mod tests {
         VaultOperationContext {
             request_id: RequestId::random(),
             actor_principal_id: None,
+            credential_kind: None,
+            credential_id: None,
             now_unix_ms,
         }
     }

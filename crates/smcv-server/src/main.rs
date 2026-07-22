@@ -1,23 +1,13 @@
 #![forbid(unsafe_code)]
 
-use std::{env, error::Error, net::SocketAddr};
+use std::{env, error::Error, net::SocketAddr, path::PathBuf};
 
-use axum::{Json, Router, routing::get};
-use serde::Serialize;
+use smcv_server::{ApiState, router};
 use tokio::{net::TcpListener, signal};
-use tower_http::{
-    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    trace::TraceLayer,
-};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 
 const DEFAULT_LISTEN: &str = "127.0.0.1:8080";
-
-#[derive(Serialize)]
-struct HealthResponse {
-    status: &'static str,
-}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -32,28 +22,34 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let address: SocketAddr = env::var("SMCV_LISTEN_ADDR")
         .unwrap_or_else(|_| String::from(DEFAULT_LISTEN))
         .parse()?;
-    if !address.ip().is_loopback() {
-        return Err("phase-zero server refuses plaintext non-loopback binding".into());
+    let protected_transport = env::var("SMCV_PROTECTED_TRANSPORT").as_deref() == Ok("1");
+    if !address.ip().is_loopback() && !protected_transport {
+        return Err("unprotected HTTP may bind only to loopback".into());
     }
-
-    let request_id_header = axum::http::HeaderName::from_static("x-request-id");
-    let app = Router::new()
-        .route("/health/live", get(health))
-        .route("/health/ready", get(health))
-        .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
-        .layer(TraceLayer::new_for_http())
-        .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid));
+    let working_directory = env::current_dir()?;
+    let data_directory = env::var_os("SMCV_DATA_DIR")
+        .map_or_else(|| working_directory.join(".smcv-data"), PathBuf::from);
+    let key_directory = env::var_os("SMCV_KEY_DIR")
+        .map_or_else(|| working_directory.join(".smcv-key"), PathBuf::from);
+    let rp_id = env::var("SMCV_RP_ID").unwrap_or_else(|_| String::from("localhost"));
+    let origin =
+        env::var("SMCV_ORIGIN").unwrap_or_else(|_| format!("http://localhost:{}", address.port()));
+    let state = ApiState::open(
+        &data_directory.join("vault.sqlite"),
+        &key_directory.join("root.key"),
+        &rp_id,
+        &origin,
+    )?;
 
     let listener = TcpListener::bind(address).await?;
-    info!(listen_address = %address, "SMCV phase-zero server listening");
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
+    info!(listen_address = %address, "SMCV server listening");
+    axum::serve(
+        listener,
+        router(state).into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await?;
     Ok(())
-}
-
-async fn health() -> Json<HealthResponse> {
-    Json(HealthResponse { status: "ok" })
 }
 
 async fn shutdown_signal() {

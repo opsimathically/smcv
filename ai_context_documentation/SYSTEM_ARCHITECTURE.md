@@ -1,6 +1,6 @@
 # System architecture
 
-Status: **Committed architecture; proposed component details**
+Status: **Committed architecture; Phases 0–2 implemented**
 Last reviewed: 2026-07-21
 
 ## Architecture summary
@@ -89,8 +89,9 @@ bounded input types, but not convenience access that bypasses authorization.
 
 - Serves same-origin web assets and `/api/v1`.
 - Holds the unlocked vault KEK only while running and ready.
-- Uses a bounded database connection pool and bounded blocking workers for
-  SQLite, password hashing, archive encryption, and other CPU/blocking work.
+- Uses one serialized SQLite connection in the supported single-process
+  topology, bounded HTTP concurrency, and four blocking password-hash slots.
+  Phase 5 completes general blocking-work isolation and production calibration.
 - Supports one active instance per SQLite vault in v1.
 - Gives long-running backup/restore jobs durable bounded state so a browser
   disconnect does not change completion semantics; encrypted download artifacts
@@ -122,6 +123,14 @@ the API for online operations. Each command documents which mode applies.
    from response-body logging.
 7. Plaintext objects are dropped and zeroized on a best-effort basis as soon as
    the response has been produced.
+
+Phase 2 implements this flow with verifier-only owner sessions and application
+credentials, an allow-only revisioned policy graph, and a request-scoped
+authorization facade. A process read/write gate linearizes protected requests
+against logout, credential revocation, policy changes, and access-affecting
+namespace moves. This gate deliberately relies on the one-process v1 topology
+and must be replaced by a cross-instance revision/lease design before any
+multi-process evolution.
 
 ## Write and concurrency model
 

@@ -16,14 +16,27 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension, backup::Backup, limits:
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+mod authorization;
+mod idempotency;
+mod identity;
 mod records;
 mod rotation;
 mod vault;
 
+pub use authorization::{
+    AuthorizationSnapshot, AuthorizationState, PolicyBindingRecord, PolicyGrantRecord,
+    PolicyInsert, PolicyRecord,
+};
+pub use idempotency::IdempotencyReservation;
+pub use identity::{
+    ApplicationCredentialInsert, ApplicationCredentialRecord, AuthenticatorKind,
+    OwnerAuthenticatorInsert, OwnerAuthenticatorRecord, PrincipalKind, PrincipalRecord,
+    ServiceIdentityInsert, ServiceIdentityRecord, SessionInsert, SessionRecord,
+};
 pub use records::{
     AuditHead, AuditRecord, EncryptedRecord, NamespaceInsert, NamespaceRecord, ScheduledSecret,
     SecretInsert, SecretLifecycleChange, SecretPurge, SecretRecord, SecretVersionInsert,
-    StoredAuditRecord,
+    SecretVersionRecord, StoredAuditRecord,
 };
 pub use rotation::{
     KekRotationJob, RewrapItem, RewrapKind, RewrappedItem, RootRewrappedKey, RotationStage,
@@ -478,6 +491,151 @@ BEGIN
 END;
 ",
     },
+    Migration {
+        version: 3,
+        checksum: "sha256:5e944e456736d5c0c6b478b92b5915b12b327db8a5e8f67fc66d8dd973a927a1",
+        sql: r"
+ALTER TABLE smcv_audit_events ADD COLUMN commitment_version INTEGER NOT NULL DEFAULT 1 CHECK (commitment_version IN (1, 2));
+ALTER TABLE smcv_audit_events ADD COLUMN credential_kind TEXT CHECK (credential_kind IS NULL OR credential_kind IN ('session', 'application'));
+ALTER TABLE smcv_audit_events ADD COLUMN credential_id BLOB CHECK (credential_id IS NULL OR length(credential_id) = 16);
+
+CREATE TABLE smcv_principals (
+    principal_id BLOB PRIMARY KEY CHECK (length(principal_id) = 16),
+    principal_kind TEXT NOT NULL CHECK (principal_kind IN ('owner', 'service')),
+    state TEXT NOT NULL CHECK (state IN ('active', 'disabled')),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    state_commitment BLOB NOT NULL CHECK (length(state_commitment) = 32),
+    created_at_unix_ms INTEGER NOT NULL,
+    updated_at_unix_ms INTEGER NOT NULL
+) STRICT;
+CREATE UNIQUE INDEX smcv_one_owner
+    ON smcv_principals(principal_kind) WHERE principal_kind = 'owner';
+
+CREATE TABLE smcv_owner_authenticators (
+    authenticator_id BLOB PRIMARY KEY CHECK (length(authenticator_id) = 16),
+    principal_id BLOB NOT NULL REFERENCES smcv_principals(principal_id) ON DELETE RESTRICT,
+    authenticator_kind TEXT NOT NULL CHECK (authenticator_kind IN ('password', 'passkey', 'recovery')),
+    credential_lookup BLOB UNIQUE CHECK (credential_lookup IS NULL OR length(credential_lookup) BETWEEN 1 AND 1024),
+    credential_data BLOB CHECK (credential_data IS NULL OR length(credential_data) BETWEEN 1 AND 65536),
+    password_phc TEXT CHECK (password_phc IS NULL OR length(password_phc) BETWEEN 32 AND 1024),
+    state TEXT NOT NULL CHECK (state IN ('active', 'revoked')),
+    created_at_unix_ms INTEGER NOT NULL,
+    last_used_at_unix_ms INTEGER,
+    revoked_at_unix_ms INTEGER,
+    state_commitment BLOB NOT NULL CHECK (length(state_commitment) = 32),
+    CHECK (
+        (authenticator_kind = 'passkey' AND credential_lookup IS NOT NULL AND credential_data IS NOT NULL AND password_phc IS NULL)
+        OR (authenticator_kind IN ('password', 'recovery') AND credential_lookup IS NULL AND credential_data IS NULL AND password_phc IS NOT NULL)
+    )
+) STRICT;
+
+CREATE TABLE smcv_sessions (
+    session_id BLOB PRIMARY KEY CHECK (length(session_id) = 16),
+    lookup_id BLOB NOT NULL UNIQUE CHECK (length(lookup_id) = 16),
+    verifier BLOB NOT NULL CHECK (length(verifier) = 32),
+    csrf_verifier BLOB NOT NULL CHECK (length(csrf_verifier) = 32),
+    principal_id BLOB NOT NULL REFERENCES smcv_principals(principal_id) ON DELETE RESTRICT,
+    authenticator_id BLOB NOT NULL REFERENCES smcv_owner_authenticators(authenticator_id) ON DELETE RESTRICT,
+    auth_method TEXT NOT NULL CHECK (auth_method IN ('password', 'passkey', 'recovery')),
+    created_at_unix_ms INTEGER NOT NULL,
+    last_used_at_unix_ms INTEGER NOT NULL,
+    idle_expires_at_unix_ms INTEGER NOT NULL,
+    absolute_expires_at_unix_ms INTEGER NOT NULL,
+    recent_auth_at_unix_ms INTEGER NOT NULL,
+    revoked_at_unix_ms INTEGER,
+    state_commitment BLOB NOT NULL CHECK (length(state_commitment) = 32),
+    CHECK (idle_expires_at_unix_ms <= absolute_expires_at_unix_ms)
+) STRICT;
+CREATE INDEX smcv_sessions_principal_active
+    ON smcv_sessions(principal_id, absolute_expires_at_unix_ms)
+    WHERE revoked_at_unix_ms IS NULL;
+
+CREATE TABLE smcv_service_identities (
+    principal_id BLOB PRIMARY KEY REFERENCES smcv_principals(principal_id) ON DELETE RESTRICT,
+    metadata_version INTEGER NOT NULL CHECK (metadata_version > 0),
+    metadata_nonce BLOB NOT NULL CHECK (length(metadata_nonce) = 24),
+    metadata_ciphertext BLOB NOT NULL CHECK (length(metadata_ciphertext) BETWEEN 16 AND 1048592),
+    metadata_dek_nonce BLOB NOT NULL CHECK (length(metadata_dek_nonce) = 24),
+    metadata_wrapped_dek BLOB NOT NULL CHECK (length(metadata_wrapped_dek) = 48),
+    metadata_kek_version INTEGER NOT NULL CHECK (metadata_kek_version > 0)
+) STRICT;
+
+CREATE TABLE smcv_application_credentials (
+    credential_id BLOB PRIMARY KEY CHECK (length(credential_id) = 16),
+    principal_id BLOB NOT NULL REFERENCES smcv_principals(principal_id) ON DELETE RESTRICT,
+    lookup_id BLOB NOT NULL UNIQUE CHECK (length(lookup_id) = 12),
+    verifier BLOB NOT NULL CHECK (length(verifier) = 32),
+    created_at_unix_ms INTEGER NOT NULL,
+    expires_at_unix_ms INTEGER,
+    last_used_at_unix_ms INTEGER,
+    revoked_at_unix_ms INTEGER,
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    state_commitment BLOB NOT NULL CHECK (length(state_commitment) = 32),
+    CHECK (expires_at_unix_ms IS NULL OR expires_at_unix_ms >= created_at_unix_ms)
+) STRICT;
+CREATE INDEX smcv_application_credentials_principal
+    ON smcv_application_credentials(principal_id, revoked_at_unix_ms);
+
+CREATE TABLE smcv_policies (
+    policy_id BLOB PRIMARY KEY CHECK (length(policy_id) = 16),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    state TEXT NOT NULL CHECK (state IN ('active', 'archived')),
+    metadata_version INTEGER NOT NULL CHECK (metadata_version > 0),
+    metadata_nonce BLOB NOT NULL CHECK (length(metadata_nonce) = 24),
+    metadata_ciphertext BLOB NOT NULL CHECK (length(metadata_ciphertext) BETWEEN 16 AND 1048592),
+    metadata_dek_nonce BLOB NOT NULL CHECK (length(metadata_dek_nonce) = 24),
+    metadata_wrapped_dek BLOB NOT NULL CHECK (length(metadata_wrapped_dek) = 48),
+    metadata_kek_version INTEGER NOT NULL CHECK (metadata_kek_version > 0),
+    state_commitment BLOB NOT NULL CHECK (length(state_commitment) = 32),
+    created_at_unix_ms INTEGER NOT NULL,
+    updated_at_unix_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE smcv_policy_grants (
+    grant_id BLOB PRIMARY KEY CHECK (length(grant_id) = 16),
+    policy_id BLOB NOT NULL REFERENCES smcv_policies(policy_id) ON DELETE RESTRICT,
+    action TEXT NOT NULL CHECK (length(action) BETWEEN 1 AND 64),
+    resource_kind TEXT NOT NULL CHECK (resource_kind IN ('namespace', 'secret')),
+    resource_id BLOB NOT NULL CHECK (length(resource_id) = 16),
+    include_descendants INTEGER NOT NULL CHECK (include_descendants IN (0, 1)),
+    created_by_principal_id BLOB NOT NULL REFERENCES smcv_principals(principal_id) ON DELETE RESTRICT,
+    created_at_unix_ms INTEGER NOT NULL,
+    state_commitment BLOB NOT NULL CHECK (length(state_commitment) = 32),
+    CHECK (include_descendants = 0 OR resource_kind = 'namespace'),
+    UNIQUE(policy_id, action, resource_kind, resource_id, include_descendants)
+) STRICT;
+
+CREATE TABLE smcv_policy_bindings (
+    principal_id BLOB NOT NULL REFERENCES smcv_principals(principal_id) ON DELETE RESTRICT,
+    policy_id BLOB NOT NULL REFERENCES smcv_policies(policy_id) ON DELETE RESTRICT,
+    created_by_principal_id BLOB NOT NULL REFERENCES smcv_principals(principal_id) ON DELETE RESTRICT,
+    created_at_unix_ms INTEGER NOT NULL,
+    state_commitment BLOB NOT NULL CHECK (length(state_commitment) = 32),
+    PRIMARY KEY(principal_id, policy_id)
+) STRICT;
+
+CREATE TABLE smcv_authorization_state (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    revision INTEGER NOT NULL CHECK (revision > 0),
+    state_commitment BLOB NOT NULL CHECK (length(state_commitment) = 32)
+) STRICT;
+INSERT INTO smcv_authorization_state(singleton, revision, state_commitment)
+    VALUES (1, 1, zeroblob(32));
+
+CREATE TABLE smcv_idempotency_records (
+    principal_id BLOB NOT NULL REFERENCES smcv_principals(principal_id) ON DELETE RESTRICT,
+    key_verifier BLOB NOT NULL CHECK (length(key_verifier) = 32),
+    request_fingerprint BLOB NOT NULL CHECK (length(request_fingerprint) = 32),
+    response_kind TEXT NOT NULL CHECK (length(response_kind) BETWEEN 1 AND 32),
+    response_id BLOB CHECK (response_id IS NULL OR length(response_id) = 16),
+    created_at_unix_ms INTEGER NOT NULL,
+    expires_at_unix_ms INTEGER NOT NULL,
+    PRIMARY KEY(principal_id, key_verifier),
+    CHECK (expires_at_unix_ms > created_at_unix_ms)
+) STRICT;
+CREATE INDEX smcv_idempotency_expiry ON smcv_idempotency_records(expires_at_unix_ms);
+",
+    },
 ];
 
 fn apply_migrations(connection: &Connection) -> StorageResult<()> {
@@ -607,13 +765,13 @@ mod tests {
             .unwrap_or_else(|error| panic!("migrated version must read: {error}"));
         let tables: i64 = connection
             .query_row(
-                "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('smcv_key_registry', 'smcv_secrets', 'smcv_audit_events')",
+                "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name IN ('smcv_key_registry', 'smcv_secrets', 'smcv_audit_events', 'smcv_principals', 'smcv_sessions')",
                 [],
                 |row| row.get(0),
             )
             .unwrap_or_else(|error| panic!("migrated tables must inspect: {error}"));
-        assert_eq!(version, 2);
-        assert_eq!(tables, 3);
+        assert_eq!(version, 3);
+        assert_eq!(tables, 5);
     }
 
     #[test]

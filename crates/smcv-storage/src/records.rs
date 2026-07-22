@@ -47,6 +47,8 @@ pub struct AuditHead {
 
 /// Complete safe audit row with its precomputed keyed commitment.
 pub struct AuditRecord<'a> {
+    /// Canonical commitment format.
+    pub commitment_version: u8,
     /// Expected next local sequence.
     pub sequence: u64,
     /// Random event identity.
@@ -61,6 +63,10 @@ pub struct AuditRecord<'a> {
     pub request_id: RequestId,
     /// Acting principal when known.
     pub actor_principal_id: Option<PrincipalId>,
+    /// Authentication context kind when present.
+    pub credential_kind: Option<&'a str>,
+    /// Session or application credential used for the request.
+    pub credential_id: Option<ObjectId>,
     /// Closed action.
     pub action: &'a str,
     /// Closed target kind.
@@ -92,6 +98,8 @@ impl fmt::Debug for AuditRecord<'_> {
 
 /// Owned audit record used by the verification service.
 pub struct StoredAuditRecord {
+    /// Canonical commitment format.
+    pub commitment_version: u8,
     /// Monotonic sequence.
     pub sequence: u64,
     /// Random event identity.
@@ -106,6 +114,10 @@ pub struct StoredAuditRecord {
     pub request_id: RequestId,
     /// Acting principal when known.
     pub actor_principal_id: Option<PrincipalId>,
+    /// Authentication context kind when present.
+    pub credential_kind: Option<String>,
+    /// Session or application credential used for the request.
+    pub credential_id: Option<ObjectId>,
     /// Closed action.
     pub action: String,
     /// Closed target kind.
@@ -276,6 +288,19 @@ pub struct ScheduledSecret {
     pub schedule: SecretSchedule,
 }
 
+/// Non-secret metadata for one immutable secret version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SecretVersionRecord {
+    /// Monotonic version number within the secret.
+    pub version: u64,
+    /// Advisory expiration and upstream-rotation schedule.
+    pub schedule: SecretSchedule,
+    /// Principal that created the version, when attributed.
+    pub created_by_principal_id: Option<PrincipalId>,
+    /// Creation timestamp.
+    pub created_at_unix_ms: i64,
+}
+
 impl fmt::Debug for SecretRecord {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
@@ -339,6 +364,48 @@ impl SqliteStore {
         })
     }
 
+    /// Lists a bounded stable page of child namespace identifiers and records.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid data for a zero page size and fails on malformed rows or
+    /// unavailable `SQLite` state.
+    pub fn namespaces_after(
+        &self,
+        parent_namespace_id: Option<NamespaceId>,
+        after_namespace_id: Option<NamespaceId>,
+        limit: u16,
+    ) -> StorageResult<Vec<NamespaceRecord>> {
+        if limit == 0 {
+            return Err(StorageError::InvalidData);
+        }
+        let after = after_namespace_id.map_or([0_u8; 16], |id| *id.as_bytes());
+        let ids = {
+            let connection = self.lock()?;
+            let mut statement = connection.prepare(
+                r"SELECT namespace_id FROM smcv_namespaces
+                  WHERE ((?1 IS NULL AND parent_namespace_id IS NULL)
+                         OR parent_namespace_id = ?1)
+                    AND namespace_id > ?2 AND lifecycle_state = 'active'
+                  ORDER BY namespace_id ASC LIMIT ?3",
+            )?;
+            let rows = statement.query_map(
+                params![
+                    parent_namespace_id.map(|id| id.as_bytes().to_vec()),
+                    after.as_slice(),
+                    i64::from(limit),
+                ],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?;
+            let mut ids = Vec::with_capacity(usize::from(limit));
+            for row in rows {
+                ids.push(NamespaceId::from_uuid(parse_uuid(&row?)?));
+            }
+            ids
+        };
+        ids.into_iter().map(|id| self.namespace(id)).collect()
+    }
+
     /// Returns the one-based depth of an existing namespace.
     ///
     /// The walk is bounded at 33 rows so corrupt or unsupported hierarchy
@@ -367,6 +434,41 @@ impl SqliteStore {
         depth
             .ok_or(StorageError::NotInitialized)
             .and_then(|value| u16::try_from(value).map_err(|_| StorageError::InvalidData))
+    }
+
+    /// Returns a namespace followed by its ancestors up to the root.
+    ///
+    /// # Errors
+    ///
+    /// Returns a safe storage error if the namespace is absent, hierarchy data
+    /// is invalid, or the database cannot complete the bounded traversal.
+    pub fn namespace_ancestors_inclusive(
+        &self,
+        namespace_id: NamespaceId,
+    ) -> StorageResult<Vec<NamespaceId>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            r"WITH RECURSIVE ancestors(namespace_id, parent_namespace_id, depth) AS (
+                   SELECT namespace_id, parent_namespace_id, 0
+                     FROM smcv_namespaces WHERE namespace_id = ?1
+                   UNION ALL
+                   SELECT parent.namespace_id, parent.parent_namespace_id, child.depth + 1
+                     FROM smcv_namespaces AS parent
+                     JOIN ancestors AS child ON parent.namespace_id = child.parent_namespace_id
+                    WHERE child.depth < 32
+               )
+               SELECT namespace_id FROM ancestors ORDER BY depth",
+        )?;
+        let rows =
+            statement.query_map([namespace_id.as_bytes()], |row| row.get::<_, Vec<u8>>(0))?;
+        let mut ancestors = Vec::new();
+        for row in rows {
+            ancestors.push(NamespaceId::from_uuid(parse_uuid(&row?)?));
+        }
+        if ancestors.is_empty() {
+            return Err(StorageError::NotInitialized);
+        }
+        Ok(ancestors)
     }
 
     /// Returns the current local audit-chain head.
@@ -412,7 +514,8 @@ impl SqliteStore {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
             r"SELECT sequence, event_id, installation_id, recovery_epoch,
-                     occurred_at_unix_ms, request_id, actor_principal_id, action,
+                     occurred_at_unix_ms, request_id, actor_principal_id,
+                     commitment_version, credential_kind, credential_id, action,
                      target_kind, target_id, outcome, previous_commitment, commitment
               FROM smcv_audit_events WHERE sequence > ?1 ORDER BY sequence LIMIT ?2",
         )?;
@@ -425,12 +528,15 @@ impl SqliteStore {
                 row.get::<_, i64>(4)?,
                 row.get::<_, Vec<u8>>(5)?,
                 row.get::<_, Option<Vec<u8>>>(6)?,
-                row.get::<_, String>(7)?,
-                row.get::<_, String>(8)?,
+                row.get::<_, i64>(7)?,
+                row.get::<_, Option<String>>(8)?,
                 row.get::<_, Option<Vec<u8>>>(9)?,
                 row.get::<_, String>(10)?,
-                row.get::<_, Vec<u8>>(11)?,
-                row.get::<_, Vec<u8>>(12)?,
+                row.get::<_, String>(11)?,
+                row.get::<_, Option<Vec<u8>>>(12)?,
+                row.get::<_, String>(13)?,
+                row.get::<_, Vec<u8>>(14)?,
+                row.get::<_, Vec<u8>>(15)?,
             ))
         })?;
         let mut records = Vec::with_capacity(usize::from(limit));
@@ -483,6 +589,55 @@ impl SqliteStore {
         insert_audit(&transaction, audit)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    /// Moves one namespace under optimistic revision control with audit.
+    ///
+    /// # Errors
+    ///
+    /// Returns conflict for a stale revision, duplicate name at the new parent,
+    /// or invalid hierarchy and a safe storage error for atomic write failure.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "explicit move preconditions and committed state"
+    )]
+    pub fn move_namespace(
+        &self,
+        namespace_id: NamespaceId,
+        expected_revision: u64,
+        new_parent_namespace_id: Option<NamespaceId>,
+        new_name_index: &[u8; 32],
+        next_state_commitment: &[u8; 32],
+        updated_at_unix_ms: i64,
+        audit: &AuditRecord<'_>,
+    ) -> StorageResult<u64> {
+        let next_revision = expected_revision
+            .checked_add(1)
+            .ok_or(StorageError::Conflict)?;
+        let connection = self.lock()?;
+        let transaction = connection.unchecked_transaction()?;
+        require_audit_head(&transaction, audit)?;
+        let changed = transaction.execute(
+            r"UPDATE smcv_namespaces
+               SET parent_namespace_id = ?1, name_index = ?2, revision = ?3,
+                   state_commitment = ?4, updated_at_unix_ms = ?5
+               WHERE namespace_id = ?6 AND revision = ?7 AND lifecycle_state = 'active'",
+            params![
+                new_parent_namespace_id.map(|value| value.as_bytes().to_vec()),
+                new_name_index.as_slice(),
+                sql_i64(next_revision)?,
+                next_state_commitment.as_slice(),
+                updated_at_unix_ms,
+                namespace_id.as_bytes(),
+                sql_i64(expected_revision)?,
+            ],
+        )?;
+        if changed != 1 {
+            return Err(StorageError::Conflict);
+        }
+        insert_audit(&transaction, audit)?;
+        transaction.commit()?;
+        Ok(next_revision)
     }
 
     /// Atomically creates an encrypted secret, immutable version 1, and audit.
@@ -648,6 +803,43 @@ impl SqliteStore {
         parse_secret(secret_id, row)
     }
 
+    /// Lists a bounded stable page of active secrets in one namespace.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid data for a zero page size and fails on malformed rows or
+    /// unavailable `SQLite` state.
+    pub fn secrets_after(
+        &self,
+        namespace_id: NamespaceId,
+        after_secret_id: Option<SecretId>,
+        limit: u16,
+    ) -> StorageResult<Vec<SecretRecord>> {
+        if limit == 0 {
+            return Err(StorageError::InvalidData);
+        }
+        let after = after_secret_id.map_or([0_u8; 16], |id| *id.as_bytes());
+        let ids = {
+            let connection = self.lock()?;
+            let mut statement = connection.prepare(
+                r"SELECT secret_id FROM smcv_secrets
+                  WHERE namespace_id = ?1 AND secret_id > ?2
+                    AND lifecycle_state = 'active'
+                  ORDER BY secret_id ASC LIMIT ?3",
+            )?;
+            let rows = statement.query_map(
+                params![namespace_id.as_bytes(), after.as_slice(), i64::from(limit)],
+                |row| row.get::<_, Vec<u8>>(0),
+            )?;
+            let mut ids = Vec::with_capacity(usize::from(limit));
+            for row in rows {
+                ids.push(SecretId::from_uuid(parse_uuid(&row?)?));
+            }
+            ids
+        };
+        ids.into_iter().map(|id| self.secret(id)).collect()
+    }
+
     /// Returns the encrypted candidate for one namespace-scoped keyed index.
     ///
     /// Callers must decrypt and compare the canonical name to handle the
@@ -747,6 +939,60 @@ impl SqliteStore {
             .optional()?
             .ok_or(StorageError::NotInitialized)?;
         parse_encrypted(row)
+    }
+
+    /// Lists bounded non-secret history metadata after an exclusive version.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid data for a zero page size and fails on malformed
+    /// durable integer widths.
+    pub fn secret_versions_after(
+        &self,
+        secret_id: SecretId,
+        after_version: u64,
+        limit: u16,
+    ) -> StorageResult<Vec<SecretVersionRecord>> {
+        if limit == 0 {
+            return Err(StorageError::InvalidData);
+        }
+        let after_version = sql_i64(after_version)?;
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            r"SELECT version, expires_at_unix_ms, rotation_due_at_unix_ms,
+                      created_by_principal_id, created_at_unix_ms
+                 FROM smcv_secret_versions
+                WHERE secret_id = ?1 AND version > ?2
+                ORDER BY version ASC LIMIT ?3",
+        )?;
+        let rows = statement.query_map(
+            params![secret_id.as_bytes(), after_version, i64::from(limit)],
+            |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, Option<i64>>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<Vec<u8>>>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            },
+        )?;
+        let mut records = Vec::with_capacity(usize::from(limit));
+        for row in rows {
+            let (version, expires, rotation, created_by, created_at) = row?;
+            records.push(SecretVersionRecord {
+                version: u64::try_from(version).map_err(|_| StorageError::InvalidData)?,
+                schedule: SecretSchedule {
+                    expires_at_unix_ms: expires,
+                    rotation_due_at_unix_ms: rotation,
+                },
+                created_by_principal_id: created_by
+                    .map(|bytes| parse_uuid(&bytes).map(PrincipalId::from_uuid))
+                    .transpose()?,
+                created_at_unix_ms: created_at,
+            });
+        }
+        Ok(records)
     }
 
     /// Returns active current versions whose expiration or upstream rotation
@@ -960,12 +1206,16 @@ pub(super) fn insert_audit(
     let target = audit
         .target_id
         .map(|identifier| identifier.as_bytes().to_vec());
+    let credential = audit
+        .credential_id
+        .map(|identifier| identifier.as_bytes().to_vec());
     transaction.execute(
         r"INSERT INTO smcv_audit_events (
                sequence, event_id, installation_id, recovery_epoch, occurred_at_unix_ms,
                request_id, actor_principal_id, action, target_kind, target_id,
-               outcome, previous_commitment, commitment
-           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+               outcome, previous_commitment, commitment, commitment_version,
+               credential_kind, credential_id
+           ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
         params![
             sequence,
             audit.event_id.as_bytes(),
@@ -980,6 +1230,9 @@ pub(super) fn insert_audit(
             audit.outcome,
             audit.previous_commitment.as_slice(),
             audit.commitment.as_slice(),
+            audit.commitment_version,
+            audit.credential_kind,
+            credential,
         ],
     )?;
     Ok(())
@@ -1028,6 +1281,9 @@ type RawAudit = (
     i64,
     i64,
     Vec<u8>,
+    Option<Vec<u8>>,
+    i64,
+    Option<String>,
     Option<Vec<u8>>,
     String,
     String,
@@ -1118,6 +1374,9 @@ fn parse_audit(row: RawAudit) -> StorageResult<StoredAuditRecord> {
         occurred_at_unix_ms,
         request_id,
         actor,
+        commitment_version,
+        credential_kind,
+        credential,
         action,
         target_kind,
         target,
@@ -1126,6 +1385,8 @@ fn parse_audit(row: RawAudit) -> StorageResult<StoredAuditRecord> {
         commitment,
     ) = row;
     Ok(StoredAuditRecord {
+        commitment_version: u8::try_from(commitment_version)
+            .map_err(|_| StorageError::InvalidData)?,
         sequence: u64::try_from(sequence).map_err(|_| StorageError::InvalidData)?,
         event_id: AuditEventId::from_uuid(parse_uuid(&event_id)?),
         installation_id: InstallationId::from_uuid(parse_uuid(&installation_id)?),
@@ -1134,6 +1395,10 @@ fn parse_audit(row: RawAudit) -> StorageResult<StoredAuditRecord> {
         request_id: RequestId::from_uuid(parse_uuid(&request_id)?),
         actor_principal_id: actor
             .map(|bytes| parse_uuid(&bytes).map(PrincipalId::from_uuid))
+            .transpose()?,
+        credential_kind,
+        credential_id: credential
+            .map(|bytes| parse_uuid(&bytes).map(ObjectId::from_uuid))
             .transpose()?,
         action,
         target_kind,

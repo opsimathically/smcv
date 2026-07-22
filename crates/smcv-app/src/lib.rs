@@ -8,15 +8,33 @@ use thiserror::Error;
 
 pub use smcv_core::SecretSchedule;
 
+mod authentication;
+mod authorization;
+mod authorized_vault;
 mod initialization;
+mod passkeys;
 mod rotation;
+mod service_identity;
 mod vault_core;
 
+pub use authentication::{
+    AuthenticatedOwner, AuthenticationError, BrowserSessionSecrets, LocalSetupCapability,
+};
+pub use authorization::{
+    AuthorizationError, EffectiveAccessDelta, PolicyDetails, PolicyMetadata, RequestPrincipal,
+};
+pub use authorized_vault::{AuthorizedVault, AuthorizedVaultError, IdempotencyInput};
 pub use initialization::{InitializationError, InitializedVault, initialize_vault};
+pub use passkeys::{PasskeyChallenge, PasskeyService};
 pub use rotation::{RootRotationOutcome, RotationProgress};
+pub use service_identity::{
+    ApplicationCredentialSummary, AuthenticatedService, IssuedApplicationCredential,
+    ServiceIdentityMetadata,
+};
 pub use vault_core::{
-    AuditVerification, DecryptedMetadata, DueSecret, MetadataInput, OwnerPurgeApproval,
-    SecretCreated, VaultError, VaultOperationContext,
+    AuditVerification, DecryptedMetadata, DueSecret, MetadataInput, NamespaceListItem,
+    OwnerPurgeApproval, SecretCreated, SecretListItem, SecretVersionSummary, VaultError,
+    VaultOperationContext,
 };
 
 /// Safe build information exposed by diagnostics and health adapters.

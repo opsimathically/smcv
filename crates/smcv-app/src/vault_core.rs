@@ -70,6 +70,10 @@ pub struct VaultOperationContext {
     pub request_id: RequestId,
     /// Acting principal when known during local initialization work.
     pub actor_principal_id: Option<PrincipalId>,
+    /// Authentication context category when the operation is remote.
+    pub(crate) credential_kind: Option<&'static str>,
+    /// Exact session or application credential used for attribution.
+    pub(crate) credential_id: Option<ObjectId>,
     /// Wall-clock timestamp supplied by the application boundary.
     pub now_unix_ms: i64,
 }
@@ -82,6 +86,41 @@ pub struct SecretCreated {
     /// Initial immutable version.
     pub version: u64,
     /// Initial optimistic concurrency revision.
+    pub revision: u64,
+}
+
+/// Safe, non-value metadata for one immutable secret version.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SecretVersionSummary {
+    /// Monotonic version number.
+    pub version: u64,
+    /// Advisory schedule attached to this version.
+    pub schedule: SecretSchedule,
+    /// Principal that created the version, when attributed.
+    pub created_by_principal_id: Option<PrincipalId>,
+    /// Creation timestamp.
+    pub created_at_unix_ms: i64,
+}
+
+/// One protected namespace-list entry.
+pub struct NamespaceListItem {
+    /// Stable namespace identity.
+    pub namespace_id: NamespaceId,
+    /// Decrypted protected metadata.
+    pub metadata: DecryptedMetadata,
+    /// Optimistic revision.
+    pub revision: u64,
+}
+
+/// One protected secret-list entry without its value.
+pub struct SecretListItem {
+    /// Stable secret identity.
+    pub secret_id: SecretId,
+    /// Decrypted protected metadata.
+    pub metadata: DecryptedMetadata,
+    /// Current immutable version.
+    pub current_version: u64,
+    /// Optimistic revision.
     pub revision: u64,
 }
 
@@ -164,7 +203,11 @@ impl InitializedVault {
     ///
     /// Returns invalid input for negative time or an unsupported bound, and a
     /// safe dependency error for storage failure.
-    pub fn secrets_due(&self, now_unix_ms: i64, limit: u16) -> Result<Vec<DueSecret>, VaultError> {
+    pub(crate) fn secrets_due(
+        &self,
+        now_unix_ms: i64,
+        limit: u16,
+    ) -> Result<Vec<DueSecret>, VaultError> {
         if now_unix_ms < 0 || limit == 0 || limit > 1000 {
             return Err(VaultError::InvalidInput);
         }
@@ -202,8 +245,23 @@ impl InitializedVault {
     ///
     /// Returns an error for invalid metadata, duplicate identity/name, missing
     /// parent, cryptographic failure, or audit/storage failure.
-    pub fn create_namespace(
+    pub(crate) fn create_namespace(
         &self,
+        parent_namespace_id: Option<NamespaceId>,
+        metadata: &MetadataInput,
+        operation: VaultOperationContext,
+    ) -> Result<NamespaceId, VaultError> {
+        self.create_namespace_with_id(
+            NamespaceId::random(),
+            parent_namespace_id,
+            metadata,
+            operation,
+        )
+    }
+
+    pub(crate) fn create_namespace_with_id(
+        &self,
+        namespace_id: NamespaceId,
         parent_namespace_id: Option<NamespaceId>,
         metadata: &MetadataInput,
         operation: VaultOperationContext,
@@ -220,7 +278,6 @@ impl InitializedVault {
                 return Err(VaultError::InvalidInput);
             }
         }
-        let namespace_id = NamespaceId::random();
         let index_scope =
             parent_namespace_id.unwrap_or_else(|| NamespaceId::from_uuid(self.vault_id.as_uuid()));
         let name_index = exact_name_index(self.blind_index_key(), index_scope, &metadata.name)
@@ -260,13 +317,87 @@ impl InitializedVault {
         Ok(namespace_id)
     }
 
+    /// Moves an active namespace after the authorization layer has confirmed
+    /// its effective-access impact.
+    pub(crate) fn move_namespace_core(
+        &self,
+        namespace_id: NamespaceId,
+        expected_revision: u64,
+        new_parent_namespace_id: Option<NamespaceId>,
+        operation: VaultOperationContext,
+    ) -> Result<u64, VaultError> {
+        let current = self.store.namespace(namespace_id).map_err(map_storage)?;
+        self.verify_namespace_state(&current)?;
+        if current.revision != expected_revision || current.lifecycle_state != "active" {
+            return Err(VaultError::Conflict);
+        }
+        if let Some(parent) = new_parent_namespace_id {
+            if parent == namespace_id {
+                return Err(VaultError::InvalidInput);
+            }
+            let parent_state = self.store.namespace(parent).map_err(map_storage)?;
+            self.verify_namespace_state(&parent_state)?;
+            if parent_state.lifecycle_state != "active"
+                || self.store.namespace_depth(parent).map_err(map_storage)? >= MAX_NAMESPACE_DEPTH
+                || self
+                    .store
+                    .namespace_ancestors_inclusive(parent)
+                    .map_err(map_storage)?
+                    .contains(&namespace_id)
+            {
+                return Err(VaultError::InvalidInput);
+            }
+        }
+        let plaintext = self.decrypt_record(
+            &current.metadata,
+            ObjectKind::NamespaceMetadata,
+            ObjectKind::WrappedNamespaceMetadataKey,
+            ObjectId::from_uuid(namespace_id.as_uuid()),
+            current.metadata_version,
+        )?;
+        let metadata = decode_metadata(plaintext, 1)?;
+        let scope = new_parent_namespace_id
+            .unwrap_or_else(|| NamespaceId::from_uuid(self.vault_id.as_uuid()));
+        let name_index =
+            exact_name_index(self.blind_index_key(), scope, &metadata.name).map_err(map_crypto)?;
+        let next_revision = expected_revision
+            .checked_add(1)
+            .ok_or(VaultError::Conflict)?;
+        let commitment = self.namespace_state_commitment(
+            namespace_id,
+            new_parent_namespace_id,
+            name_index.as_bytes(),
+            "active",
+            next_revision,
+            current.metadata_version,
+        )?;
+        let audit = self.build_audit(
+            "namespace:move",
+            "namespace",
+            Some(ObjectId::from_uuid(namespace_id.as_uuid())),
+            operation,
+        )?;
+        self.store
+            .move_namespace(
+                namespace_id,
+                expected_revision,
+                new_parent_namespace_id,
+                name_index.as_bytes(),
+                &commitment,
+                operation.now_unix_ms,
+                &audit,
+            )
+            .map_err(map_storage)
+    }
+
     /// Creates an encrypted secret and immutable version 1 with atomic audit.
     ///
     /// # Errors
     ///
     /// Returns an error for invalid bounds, missing namespace, duplicate name,
     /// cryptographic failure, or audit/storage failure.
-    pub fn create_secret(
+    #[cfg_attr(not(test), allow(dead_code, reason = "scheduled facade is canonical"))]
+    pub(crate) fn create_secret(
         &self,
         namespace_id: NamespaceId,
         metadata: &MetadataInput,
@@ -292,8 +423,27 @@ impl InitializedVault {
     ///
     /// Returns an error for invalid schedule/metadata/value bounds, duplicate
     /// identity/name, cryptographic failure, or audit/storage failure.
-    pub fn create_secret_with_schedule(
+    pub(crate) fn create_secret_with_schedule(
         &self,
+        namespace_id: NamespaceId,
+        metadata: &MetadataInput,
+        value: ProtectedBytes,
+        schedule: SecretSchedule,
+        operation: VaultOperationContext,
+    ) -> Result<SecretCreated, VaultError> {
+        self.create_secret_with_id_and_schedule(
+            SecretId::random(),
+            namespace_id,
+            metadata,
+            value,
+            schedule,
+            operation,
+        )
+    }
+
+    pub(crate) fn create_secret_with_id_and_schedule(
+        &self,
+        secret_id: SecretId,
         namespace_id: NamespaceId,
         metadata: &MetadataInput,
         value: ProtectedBytes,
@@ -305,7 +455,6 @@ impl InitializedVault {
         if !schedule.is_valid() {
             return Err(VaultError::InvalidInput);
         }
-        let secret_id = SecretId::random();
         let object_id = ObjectId::from_uuid(secret_id.as_uuid());
         let name_index = exact_name_index(self.blind_index_key(), namespace_id, &metadata.name)
             .map_err(map_crypto)?;
@@ -364,7 +513,8 @@ impl InitializedVault {
     ///
     /// Returns a conflict for stale preconditions and fails closed for any
     /// cryptographic, audit, or storage error.
-    pub fn update_secret(
+    #[cfg_attr(not(test), allow(dead_code, reason = "scheduled facade is canonical"))]
+    pub(crate) fn update_secret(
         &self,
         secret_id: SecretId,
         expected_current_version: u64,
@@ -389,7 +539,7 @@ impl InitializedVault {
     ///
     /// Returns a conflict for stale preconditions, invalid input for an invalid
     /// schedule, and fails closed for cryptographic, audit, or storage errors.
-    pub fn update_secret_with_schedule(
+    pub(crate) fn update_secret_with_schedule(
         &self,
         secret_id: SecretId,
         expected_current_version: u64,
@@ -475,7 +625,7 @@ impl InitializedVault {
     ///
     /// Returns an error for absent/inactive state, cryptographic integrity
     /// failure, or audit persistence failure.
-    pub fn reveal_current_secret(
+    pub(crate) fn reveal_current_secret(
         &self,
         secret_id: SecretId,
         operation: VaultOperationContext,
@@ -506,6 +656,83 @@ impl InitializedVault {
         Ok(plaintext)
     }
 
+    /// Returns a bounded page of immutable version metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns not found for an absent or deleted secret, invalid input for an
+    /// unsupported page size, and integrity/unavailable on protected failure.
+    pub(crate) fn secret_version_history(
+        &self,
+        secret_id: SecretId,
+        after_version: u64,
+        limit: u16,
+    ) -> Result<Vec<SecretVersionSummary>, VaultError> {
+        if !(1..=100).contains(&limit) {
+            return Err(VaultError::InvalidInput);
+        }
+        let state = self.store.secret(secret_id).map_err(map_storage)?;
+        self.verify_secret_state(&state)?;
+        if state.lifecycle_state == "deleted" {
+            return Err(VaultError::NotFound);
+        }
+        self.store
+            .secret_versions_after(secret_id, after_version, limit)
+            .map_err(map_storage)
+            .map(|records| {
+                records
+                    .into_iter()
+                    .map(|record| SecretVersionSummary {
+                        version: record.version,
+                        schedule: record.schedule,
+                        created_by_principal_id: record.created_by_principal_id,
+                        created_at_unix_ms: record.created_at_unix_ms,
+                    })
+                    .collect()
+            })
+    }
+
+    /// Decrypts and audits one exact immutable historical value.
+    ///
+    /// # Errors
+    ///
+    /// Returns not found without distinguishing an absent secret or version,
+    /// and fails closed on integrity or audit-persistence errors.
+    pub(crate) fn reveal_secret_version(
+        &self,
+        secret_id: SecretId,
+        version: u64,
+        operation: VaultOperationContext,
+    ) -> Result<ProtectedBytes, VaultError> {
+        if version == 0 {
+            return Err(VaultError::InvalidInput);
+        }
+        let state = self.store.secret(secret_id).map_err(map_storage)?;
+        self.verify_secret_state(&state)?;
+        if state.lifecycle_state == "deleted" || version > state.current_version {
+            return Err(VaultError::NotFound);
+        }
+        let encrypted = self
+            .store
+            .encrypted_secret_version(secret_id, version)
+            .map_err(map_storage)?;
+        let plaintext = self.decrypt_record(
+            &encrypted,
+            ObjectKind::SecretVersion,
+            ObjectKind::WrappedDataKey,
+            ObjectId::from_uuid(secret_id.as_uuid()),
+            version,
+        )?;
+        let audit = self.build_audit(
+            "secret:version-read",
+            "secret",
+            Some(ObjectId::from_uuid(secret_id.as_uuid())),
+            operation,
+        )?;
+        self.store.append_audit(&audit).map_err(map_storage)?;
+        Ok(plaintext)
+    }
+
     /// Looks up a secret by an exact protected name and verifies the decrypted
     /// canonical name before returning its stable identity.
     ///
@@ -513,7 +740,7 @@ impl InitializedVault {
     ///
     /// Returns not-found for no candidate, collision, or inactive candidate;
     /// fails closed for metadata integrity/storage errors.
-    pub fn find_secret_by_exact_name(
+    pub(crate) fn find_secret_by_exact_name(
         &self,
         namespace_id: NamespaceId,
         name: &ProtectedString,
@@ -548,7 +775,7 @@ impl InitializedVault {
     ///
     /// Returns not-found for inactive state and integrity for malformed or
     /// unauthenticated metadata.
-    pub fn read_secret_metadata(
+    pub(crate) fn read_secret_metadata(
         &self,
         secret_id: SecretId,
     ) -> Result<DecryptedMetadata, VaultError> {
@@ -560,13 +787,78 @@ impl InitializedVault {
         self.decrypt_metadata(&candidate)
     }
 
+    /// Loads and decrypts a bounded page of active child namespaces.
+    pub(crate) fn list_namespaces(
+        &self,
+        parent_namespace_id: Option<NamespaceId>,
+        after_namespace_id: Option<NamespaceId>,
+        limit: u16,
+    ) -> Result<Vec<NamespaceListItem>, VaultError> {
+        if !(1..=100).contains(&limit) {
+            return Err(VaultError::InvalidInput);
+        }
+        let records = self
+            .store
+            .namespaces_after(parent_namespace_id, after_namespace_id, limit)
+            .map_err(map_storage)?;
+        let mut items = Vec::with_capacity(records.len());
+        for record in records {
+            self.verify_namespace_state(&record)?;
+            let plaintext = self.decrypt_record(
+                &record.metadata,
+                ObjectKind::NamespaceMetadata,
+                ObjectKind::WrappedNamespaceMetadataKey,
+                ObjectId::from_uuid(record.namespace_id.as_uuid()),
+                record.metadata_version,
+            )?;
+            items.push(NamespaceListItem {
+                namespace_id: record.namespace_id,
+                metadata: decode_metadata(plaintext, 1)?,
+                revision: record.revision,
+            });
+        }
+        Ok(items)
+    }
+
+    /// Loads and decrypts a bounded metadata-only page of active secrets.
+    pub(crate) fn list_secrets(
+        &self,
+        namespace_id: NamespaceId,
+        after_secret_id: Option<SecretId>,
+        limit: u16,
+    ) -> Result<Vec<SecretListItem>, VaultError> {
+        if !(1..=100).contains(&limit) {
+            return Err(VaultError::InvalidInput);
+        }
+        let namespace = self.store.namespace(namespace_id).map_err(map_storage)?;
+        self.verify_namespace_state(&namespace)?;
+        if namespace.lifecycle_state != "active" {
+            return Err(VaultError::NotFound);
+        }
+        let records = self
+            .store
+            .secrets_after(namespace_id, after_secret_id, limit)
+            .map_err(map_storage)?;
+        let mut items = Vec::with_capacity(records.len());
+        for record in records {
+            self.verify_secret_state(&record)?;
+            items.push(SecretListItem {
+                secret_id: record.secret_id,
+                metadata: self.decrypt_metadata(&record)?,
+                current_version: record.current_version,
+                revision: record.revision,
+            });
+        }
+        Ok(items)
+    }
+
     /// Archives an active secret without deleting immutable versions.
     ///
     /// # Errors
     ///
     /// Returns a conflict for stale revision/state and fails closed if audit
     /// cannot commit atomically.
-    pub fn archive_secret(
+    pub(crate) fn archive_secret(
         &self,
         secret_id: SecretId,
         expected_revision: u64,
@@ -588,7 +880,7 @@ impl InitializedVault {
     ///
     /// Returns a conflict for stale revision/state and fails closed if audit
     /// cannot commit atomically.
-    pub fn restore_archived_secret(
+    pub(crate) fn restore_archived_secret(
         &self,
         secret_id: SecretId,
         expected_revision: u64,
@@ -610,7 +902,7 @@ impl InitializedVault {
     ///
     /// Returns a conflict for stale revision/state and fails closed if audit
     /// cannot commit atomically.
-    pub fn delete_secret(
+    pub(crate) fn delete_secret(
         &self,
         secret_id: SecretId,
         expected_revision: u64,
@@ -640,7 +932,7 @@ impl InitializedVault {
         clippy::needless_pass_by_value,
         reason = "single-use authorization capability is consumed by the operation"
     )]
-    pub fn purge_secret_after_owner_approval(
+    pub(crate) fn purge_secret_after_owner_approval(
         &self,
         secret_id: SecretId,
         expected_revision: u64,
@@ -684,7 +976,7 @@ impl InitializedVault {
     ///
     /// Returns an integrity error for any sequence, predecessor, or keyed
     /// commitment mismatch, and unavailable for storage failure.
-    pub fn verify_audit_chain(&self) -> Result<AuditVerification, VaultError> {
+    pub(crate) fn verify_audit_chain(&self) -> Result<AuditVerification, VaultError> {
         let mut previous = [0_u8; 32];
         let mut sequence = 0_u64;
         loop {
@@ -702,6 +994,7 @@ impl InitializedVault {
                     return Err(VaultError::Integrity);
                 }
                 let input = AuditCommitmentInput {
+                    commitment_version: record.commitment_version,
                     previous,
                     sequence: record.sequence,
                     event_id: record.event_id,
@@ -710,6 +1003,8 @@ impl InitializedVault {
                     occurred_at_unix_ms: record.occurred_at_unix_ms,
                     request_id: record.request_id,
                     actor_principal_id: record.actor_principal_id,
+                    credential_kind: record.credential_kind.as_deref(),
+                    credential_id: record.credential_id,
                     action: &record.action,
                     target_kind: &record.target_kind,
                     target_id: record.target_id,
@@ -848,7 +1143,10 @@ impl InitializedVault {
             .map_err(map_crypto)
     }
 
-    fn verify_secret_state(&self, secret: &smcv_storage::SecretRecord) -> Result<(), VaultError> {
+    pub(crate) fn verify_secret_state(
+        &self,
+        secret: &smcv_storage::SecretRecord,
+    ) -> Result<(), VaultError> {
         let expected = self.secret_state_commitment(
             secret.secret_id,
             secret.namespace_id,
@@ -865,7 +1163,7 @@ impl InitializedVault {
         Ok(())
     }
 
-    fn verify_namespace_state(
+    pub(crate) fn verify_namespace_state(
         &self,
         namespace: &smcv_storage::NamespaceRecord,
     ) -> Result<(), VaultError> {
@@ -883,7 +1181,7 @@ impl InitializedVault {
         Ok(())
     }
 
-    fn encrypt_record(
+    pub(crate) fn encrypt_record(
         &self,
         plaintext: ProtectedBytes,
         object_kind: ObjectKind,
@@ -921,7 +1219,7 @@ impl InitializedVault {
         })
     }
 
-    fn decrypt_record(
+    pub(crate) fn decrypt_record(
         &self,
         encrypted: &EncryptedRecord,
         object_kind: ObjectKind,
@@ -986,6 +1284,17 @@ impl InitializedVault {
         target_id: Option<ObjectId>,
         operation: VaultOperationContext,
     ) -> Result<AuditRecord<'static>, VaultError> {
+        self.build_audit_outcome(action, target_kind, target_id, "allowed", operation)
+    }
+
+    pub(crate) fn build_audit_outcome(
+        &self,
+        action: &'static str,
+        target_kind: &'static str,
+        target_id: Option<ObjectId>,
+        outcome: &'static str,
+        operation: VaultOperationContext,
+    ) -> Result<AuditRecord<'static>, VaultError> {
         let head = self.store.audit_head().map_err(map_storage)?;
         let sequence = head.sequence.checked_add(1).ok_or(VaultError::Conflict)?;
         let installation = self
@@ -995,6 +1304,7 @@ impl InitializedVault {
             .ok_or(VaultError::Unavailable)?;
         let event_id = AuditEventId::random();
         let input = AuditCommitmentInput {
+            commitment_version: 2,
             previous: head.commitment,
             sequence,
             event_id,
@@ -1003,13 +1313,16 @@ impl InitializedVault {
             occurred_at_unix_ms: operation.now_unix_ms,
             request_id: operation.request_id,
             actor_principal_id: operation.actor_principal_id,
+            credential_kind: operation.credential_kind,
+            credential_id: operation.credential_id,
             action,
             target_kind,
             target_id,
-            outcome: "allowed",
+            outcome,
         };
         let commitment = audit_commitment(self.audit_key(), &input).map_err(map_crypto)?;
         Ok(AuditRecord {
+            commitment_version: 2,
             sequence,
             event_id,
             installation_id: self.installation_id,
@@ -1017,10 +1330,12 @@ impl InitializedVault {
             occurred_at_unix_ms: operation.now_unix_ms,
             request_id: operation.request_id,
             actor_principal_id: operation.actor_principal_id,
+            credential_kind: operation.credential_kind,
+            credential_id: operation.credential_id,
             action,
             target_kind,
             target_id,
-            outcome: "allowed",
+            outcome,
             previous_commitment: head.commitment,
             commitment: *commitment.as_bytes(),
         })
@@ -1266,6 +1581,8 @@ mod tests {
         VaultOperationContext {
             request_id: RequestId::random(),
             actor_principal_id: None,
+            credential_kind: None,
+            credential_id: None,
             now_unix_ms,
         }
     }

@@ -5,8 +5,11 @@ Last reviewed: 2026-07-21
 
 ## Toolchain and workspace
 
-- Rust 2024 is the language edition. The declared MSRV is Rust 1.85 and the
+- Rust 2024 is the language edition. The declared MSRV is Rust 1.88 and the
   reproducible developer/CI toolchain is pinned to Rust 1.94.0.
+- The MSRV advanced from 1.85 to 1.88 during Phase 2 so the WebAuthn certificate
+  parser can select patched `time 0.3.47`; retaining the former MSRV would have
+  required accepting RUSTSEC-2026-0009.
 - The deployable shape remains one server and one administrative CLI. Crate
   boundaries enforce inward dependencies: `smcv-core` has no HTTP, SQLite, or
   cryptographic implementation dependency; adapters depend on the core.

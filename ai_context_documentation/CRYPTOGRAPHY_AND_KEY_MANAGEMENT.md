@@ -95,9 +95,10 @@ recovery workflow requires a display-once recovery value.
 ## Human password verification
 
 Passwords are authentication material, not vault encryption keys. Store a
-salted Argon2id verifier with parameters on each record. Phase 2 calibrates the
-work factor on minimum supported hardware, applies upper bounds to imported or
-stored parameters, and supports increasing cost after successful login.
+salted Argon2id verifier with parameters on each record. Phase 2 commits an
+initial 64 MiB, three-iteration, one-lane Argon2id profile, caps password input
+at 1,024 bytes, and limits concurrent password work to four jobs. Phase 5
+calibrates the profile on supported minimum hardware before release.
 
 V1 does not use a non-portable external password pepper because losing it would
 violate the `.smcvault` plus archive-key recovery promise. A future pepper or
@@ -124,6 +125,12 @@ does not need an intentionally expensive password KDF. Authentication performs
 a dummy verification path for unknown lookup IDs to reduce enumeration
 signals. Credential prefixes identify SMCV tokens for handling and leak
 prevention without encoding authorization.
+
+Browser session and CSRF values are independently random display-once tokens.
+SQLite stores a public lookup component plus distinct domain-separated HMAC
+verifiers; neither raw value is durable. Application credentials use their own
+token format and HMAC domain. Debug formatting redacts all three classes, and
+database/WAL sentinel scans include password and application credential values.
 
 ## Backup encryption
 

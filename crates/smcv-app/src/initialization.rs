@@ -28,6 +28,7 @@ pub struct InitializedVault {
     blind_index_key: KeyMaterial,
     audit_key: KeyMaterial,
     token_verifier_key: KeyMaterial,
+    pub(crate) authorization_gate: RwLock<()>,
 }
 
 struct KeyRing {
@@ -187,12 +188,11 @@ pub fn initialize_vault(
 
     let (vault_id, installation_id, root_key) = if root_key_path.exists() {
         let root = load_root_key_file(root_key_path)?;
-        if let Some(existing) = installation {
-            if existing.vault_id != root.vault_id
-                || existing.installation_id != root.installation_id
-            {
-                return Err(StorageError::StateConflict.into());
-            }
+        if let Some(existing) = installation
+            && (existing.vault_id != root.vault_id
+                || existing.installation_id != root.installation_id)
+        {
+            return Err(StorageError::StateConflict.into());
         }
         (root.vault_id, root.installation_id, root.key)
     } else {
@@ -276,6 +276,7 @@ pub fn initialize_vault(
         blind_index_key,
         audit_key,
         token_verifier_key,
+        authorization_gate: RwLock::new(()),
     })
 }
 

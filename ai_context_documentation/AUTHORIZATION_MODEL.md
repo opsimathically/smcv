@@ -1,6 +1,6 @@
 # Identity and authorization model
 
-Status: **Committed outcomes; proposed v1 policy representation**
+Status: **Committed and implemented for the Phase 2 API**
 Last reviewed: 2026-07-21
 
 ## Identity types
@@ -96,6 +96,12 @@ credential.
 Credential expiration and revocation are authentication checks. They are not
 policy conditions.
 
+The implemented representation is an authenticated, monotonically revisioned
+allow-only graph of policies, grants, and service bindings. Policy labels are
+encrypted. Each graph item and the aggregate graph have keyed commitments;
+archive, grant, bind, and namespace-move transactions advance the graph
+revision atomically with audit. No authorization cache is used.
+
 ## Evaluation algorithm
 
 1. Require an authenticated, active principal and credential/session context.
@@ -107,6 +113,15 @@ policy conditions.
 6. Allow only if an exact action grant matches the resource or an ancestor
    namespace grant explicitly includes descendants.
 7. Emit one audit decision with the rule reference or a safe denial category.
+
+The only public plaintext-capable application entry point is a request-scoped
+`AuthorizedVault`. Construction reacquires the current session or application
+credential under a process authorization read gate. Credential revocation,
+logout, policy changes, and access-affecting namespace moves take the write
+gate. An operation already executing finishes under its prior decision;
+revocation then commits and the next request must reauthenticate and
+reauthorize. This synchronization is valid only for the committed one-process
+v1 topology.
 
 The domain returns only allow/deny plus internal decision metadata. It does not
 return secret data or user-facing error text.
@@ -171,6 +186,12 @@ or another approved strong factor within a short configured window:
 - Purge data or disable security controls.
 
 The initial login time alone is insufficient for a long-lived session.
+
+Phase 2 uses a five-minute recent-authentication window, 30-minute sliding idle
+session expiry, and 12-hour absolute expiry. Session and CSRF tokens use
+independent HMAC domains and only their verifiers are durable. High-risk owner
+actions are rejected after the recent window even while the underlying session
+remains valid.
 
 ## Required test matrix
 
