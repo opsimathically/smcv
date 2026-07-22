@@ -1,7 +1,7 @@
 # Identity and authorization model
 
 Status: **Committed and implemented for the Phase 2 API**
-Last reviewed: 2026-07-21
+Last reviewed: 2026-07-22
 
 ## Identity types
 
@@ -112,7 +112,9 @@ revision atomically with audit. No authorization cache is used.
 5. Load the principal's current policy bindings.
 6. Allow only if an exact action grant matches the resource or an ancestor
    namespace grant explicitly includes descendants.
-7. Emit one audit decision with the rule reference or a safe denial category.
+7. Emit one audit decision with the closed action, opaque target, outcome,
+   principal/credential attribution, and request correlation. Denials caused
+   by an absent target follow the same audited path as no-grant denials.
 
 The only public plaintext-capable application entry point is a request-scoped
 `AuthorizedVault`. Construction reacquires the current session or application
@@ -125,6 +127,11 @@ v1 topology.
 
 The domain returns only allow/deny plus internal decision metadata. It does not
 return secret data or user-facing error text.
+
+Move-impact preview is itself an `effective-access:read` decision. It verifies
+the keyed state commitment of the moved namespace, the proposed parent, and
+every ancestor used in the calculation before returning a delta; the eventual
+move independently recalculates the same delta under the write gate.
 
 ## Existence confidentiality
 
@@ -167,8 +174,11 @@ observable status, body shape, and coarse timing for common existence probes.
 4. For rotation, issue a second credential, deploy it, observe successful use,
    then revoke the first.
 5. Revocation immediately blocks new calls and is audited.
-6. Attempted use of revoked or expired credentials is rate-limited and audited
-   without placing raw material in the event.
+6. Attempted use of a known wrong-secret, revoked, expired, or backward-time
+   credential is rate-limited and audited without treating the claimant as an
+   authenticated actor or placing raw material in the event. Unknown random
+   lookups remain uniform authentication failures and are not durable audit
+   cardinality keys.
 
 Credential values cannot be retrieved after issuance. "Reveal credential"
 means create or rotate, never decrypt a stored token.

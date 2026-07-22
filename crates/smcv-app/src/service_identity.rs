@@ -463,6 +463,7 @@ impl InitializedVault {
     pub fn authenticate_application_credential(
         &self,
         presented: &ProtectedString,
+        request_id: RequestId,
         now_unix_ms: i64,
     ) -> Result<AuthenticatedService, AuthenticationError> {
         let lookup = token_lookup_id(presented.expose()).ok_or(AuthenticationError::Rejected)?;
@@ -492,6 +493,7 @@ impl InitializedVault {
                 .expires_at_unix_ms
                 .is_some_and(|expiry| expiry < now_unix_ms)
         {
+            self.audit_application_credential_denial(&record, request_id, now_unix_ms)?;
             return Err(AuthenticationError::Rejected);
         }
         let principal = self
@@ -500,6 +502,7 @@ impl InitializedVault {
             .map_err(map_storage)?;
         verify_principal_commitment(self, &principal)?;
         if principal.state != "active" || principal.kind != smcv_storage::PrincipalKind::Service {
+            self.audit_application_credential_denial(&record, request_id, now_unix_ms)?;
             return Err(AuthenticationError::Rejected);
         }
         let next_revision = record
@@ -530,6 +533,31 @@ impl InitializedVault {
             principal_id: record.principal_id,
             credential_id: record.credential_id,
         })
+    }
+
+    fn audit_application_credential_denial(
+        &self,
+        record: &ApplicationCredentialRecord,
+        request_id: RequestId,
+        now_unix_ms: i64,
+    ) -> Result<(), AuthenticationError> {
+        let credential_id = ObjectId::from_uuid(record.credential_id.as_uuid());
+        let audit = self
+            .build_audit_outcome(
+                "credential:authenticate",
+                "credential",
+                Some(credential_id),
+                "denied",
+                VaultOperationContext {
+                    request_id,
+                    actor_principal_id: None,
+                    credential_kind: Some("application"),
+                    credential_id: Some(credential_id),
+                    now_unix_ms,
+                },
+            )
+            .map_err(|_| AuthenticationError::Unavailable)?;
+        self.store.append_audit(&audit).map_err(map_storage)
     }
 
     /// Revokes one application credential effective on its next checked use.
@@ -692,6 +720,10 @@ pub(crate) fn verify_service_context_active(
     verify_application_credential_commitment(vault, &record)?;
     if record.principal_id != service.principal_id()
         || record.revoked_at_unix_ms.is_some()
+        || now_unix_ms < record.created_at_unix_ms
+        || record
+            .last_used_at_unix_ms
+            .is_some_and(|last_used| now_unix_ms < last_used)
         || record
             .expires_at_unix_ms
             .is_some_and(|expiry| expiry < now_unix_ms)
@@ -792,7 +824,7 @@ mod tests {
         time::Duration,
     };
 
-    use smcv_core::{PrincipalId, ProtectedString, RequestId};
+    use smcv_core::{ObjectId, PrincipalId, ProtectedString, RequestId};
     use tempfile::TempDir;
 
     use crate::{
@@ -895,7 +927,11 @@ mod tests {
             "an attacker-selected valid token must remain in the peer limiter bucket"
         );
         let authenticated = vault
-            .authenticate_application_credential(&issued.plaintext, 1_800_000_007_000)
+            .authenticate_application_credential(
+                &issued.plaintext,
+                RequestId::random(),
+                1_800_000_007_000,
+            )
             .unwrap_or_else(|error| panic!("synthetic credential must authenticate: {error}"));
         assert_eq!(authenticated.principal_id(), service_id);
         assert!(!format!("{issued:?}").contains(issued.plaintext.expose()));
@@ -980,11 +1016,26 @@ mod tests {
         revoker
             .join()
             .unwrap_or_else(|_| panic!("revoker must not panic"));
+        let revoked_attempt_request = RequestId::random();
         assert!(
             vault
-                .authenticate_application_credential(&issued.plaintext, 1_800_000_010_000)
+                .authenticate_application_credential(
+                    &issued.plaintext,
+                    revoked_attempt_request,
+                    1_800_000_010_000,
+                )
                 .is_err()
         );
+        let audit = vault
+            .store
+            .audit_records_after(0, 1_000)
+            .unwrap_or_else(|error| panic!("authentication audit must load: {error}"));
+        assert!(audit.iter().any(|event| {
+            event.request_id == revoked_attempt_request
+                && event.action == "credential:authenticate"
+                && event.outcome == "denied"
+                && event.credential_id == Some(ObjectId::from_uuid(issued.credential_id.as_uuid()))
+        }));
         assert!(
             vault
                 .authorized(
@@ -1003,7 +1054,11 @@ mod tests {
         .unwrap_or_else(|error| panic!("revoked vault must restart: {error}"));
         assert!(
             restarted
-                .authenticate_application_credential(&issued.plaintext, 1_800_000_011_001)
+                .authenticate_application_credential(
+                    &issued.plaintext,
+                    RequestId::random(),
+                    1_800_000_011_001,
+                )
                 .is_err()
         );
         for entry in fs::read_dir(&database_directory)

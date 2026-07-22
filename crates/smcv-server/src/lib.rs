@@ -787,6 +787,7 @@ async fn preview_namespace_move(
             owner,
             namespace_id(&id).map_err(|()| ApiError::not_found(request_id))?,
             new_parent,
+            request_id,
             now,
         )
         .map_err(|_| ApiError::not_found(request_id))?;
@@ -2100,7 +2101,7 @@ fn authenticate_principal(
     if let Some(bearer) = bearer(headers) {
         let service = state
             .vault
-            .authenticate_application_credential(&ProtectedString::new(bearer), now)
+            .authenticate_application_credential(&ProtectedString::new(bearer), request_id, now)
             .map_err(|_| ApiError::authentication(request_id))?;
         return Ok(RequestPrincipal::Service(service));
     }

@@ -144,6 +144,7 @@ impl InitializedVault {
         owner: AuthenticatedOwner,
         namespace_id: NamespaceId,
         new_parent_namespace_id: Option<NamespaceId>,
+        request_id: RequestId,
         now_unix_ms: i64,
     ) -> Result<Vec<EffectiveAccessDelta>, AuthorizationError> {
         let _gate = self
@@ -152,6 +153,14 @@ impl InitializedVault {
             .map_err(|_| AuthorizationError::Unavailable)?;
         crate::authentication::verify_owner_context_active(self, owner, now_unix_ms)
             .map_err(|_| AuthorizationError::Denied)?;
+        self.authorize(
+            RequestPrincipal::Owner(owner),
+            Action::EffectiveAccessRead,
+            ResourceKind::Namespace,
+            ObjectId::from_uuid(namespace_id.as_uuid()),
+            request_id,
+            now_unix_ms,
+        )?;
         self.preview_namespace_move_core(owner, namespace_id, new_parent_namespace_id, now_unix_ms)
     }
 
@@ -165,16 +174,16 @@ impl InitializedVault {
         if !owner.is_valid_at(now_unix_ms) {
             return Err(AuthorizationError::Denied);
         }
-        let old_ancestors = self
-            .store
-            .namespace_ancestors_inclusive(namespace_id)
-            .map_err(map_authorization_storage)?;
+        let old_ancestors = self.resource_namespace_ancestors(
+            ResourceKind::Namespace,
+            ObjectId::from_uuid(namespace_id.as_uuid()),
+        )?;
         let mut new_ancestors = vec![namespace_id];
         if let Some(parent) = new_parent_namespace_id {
-            let parent_ancestors = self
-                .store
-                .namespace_ancestors_inclusive(parent)
-                .map_err(map_authorization_storage)?;
+            let parent_ancestors = self.resource_namespace_ancestors(
+                ResourceKind::Namespace,
+                ObjectId::from_uuid(parent.as_uuid()),
+            )?;
             if parent_ancestors.contains(&namespace_id) {
                 return Err(AuthorizationError::InvalidInput);
             }
@@ -880,15 +889,19 @@ impl InitializedVault {
                 }
             }
             RequestPrincipal::Service(service) => {
-                if !action.is_service_grantable() {
-                    Err(AuthorizationError::Denied)
-                } else if self.service_is_allowed(
-                    service.principal_id(),
-                    action,
-                    resource_kind,
-                    resource_id,
-                )? {
-                    Ok(())
+                if action.is_service_grantable() {
+                    match self.service_is_allowed(
+                        service.principal_id(),
+                        action,
+                        resource_kind,
+                        resource_id,
+                    ) {
+                        Ok(true) => Ok(()),
+                        Ok(false) | Err(AuthorizationError::Denied) => {
+                            Err(AuthorizationError::Denied)
+                        }
+                        Err(error) => return Err(error),
+                    }
                 } else {
                     Err(AuthorizationError::Denied)
                 }
@@ -1625,7 +1638,11 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("writer credential must issue: {error}"));
         let writer_auth = vault
-            .authenticate_application_credential(&writer_credential.plaintext, 1_800_000_008_600)
+            .authenticate_application_credential(
+                &writer_credential.plaintext,
+                RequestId::random(),
+                1_800_000_008_600,
+            )
             .unwrap_or_else(|error| panic!("writer must authenticate: {error}"));
         let writer_vault = vault
             .authorized(
@@ -1658,8 +1675,22 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("synthetic credential must issue: {error}"));
         let service_auth = vault
-            .authenticate_application_credential(&credential.plaintext, 1_800_000_010_000)
+            .authenticate_application_credential(
+                &credential.plaintext,
+                RequestId::random(),
+                1_800_000_010_000,
+            )
             .unwrap_or_else(|error| panic!("synthetic service must authenticate: {error}"));
+        assert!(
+            vault
+                .authorized(
+                    RequestPrincipal::Service(service_auth),
+                    RequestId::random(),
+                    1_800_000_009_999,
+                )
+                .is_err(),
+            "a service context must not move durable last-use time backward"
+        );
         let service_vault = vault
             .authorized(
                 RequestPrincipal::Service(service_auth),
@@ -1708,6 +1739,20 @@ mod tests {
                 )
                 .is_err()
         );
+        let absent_target = ObjectId::random();
+        let absent_request = RequestId::random();
+        assert!(
+            vault
+                .authorize(
+                    RequestPrincipal::Service(service_auth),
+                    Action::SecretMetadataRead,
+                    ResourceKind::Secret,
+                    absent_target,
+                    absent_request,
+                    1_800_000_012_100,
+                )
+                .is_err()
+        );
         let inherited_policy = vault
             .create_policy(
                 owner,
@@ -1741,8 +1786,49 @@ mod tests {
                 1_800_000_015_000,
             )
             .unwrap_or_else(|error| panic!("inherited binding must create: {error}"));
+        let broader_parent_record = vault
+            .store
+            .namespace(broader_parent)
+            .unwrap_or_else(|error| panic!("broader parent must load: {error}"));
+        let external = rusqlite::Connection::open(database_directory.join("vault.sqlite"))
+            .unwrap_or_else(|error| panic!("synthetic database must open: {error}"));
+        external
+            .execute(
+                "UPDATE smcv_namespaces SET state_commitment = ?1 WHERE namespace_id = ?2",
+                rusqlite::params![[0_u8; 32].as_slice(), broader_parent.as_bytes()],
+            )
+            .unwrap_or_else(|error| panic!("synthetic tamper must commit: {error}"));
+        assert!(
+            vault
+                .preview_namespace_move(
+                    owner,
+                    namespace,
+                    Some(broader_parent),
+                    RequestId::random(),
+                    1_800_000_015_500,
+                )
+                .is_err(),
+            "move preview must authenticate every ancestor used in its access delta"
+        );
+        external
+            .execute(
+                "UPDATE smcv_namespaces SET state_commitment = ?1 WHERE namespace_id = ?2",
+                rusqlite::params![
+                    broader_parent_record.state_commitment.as_slice(),
+                    broader_parent.as_bytes()
+                ],
+            )
+            .unwrap_or_else(|error| panic!("synthetic state must restore: {error}"));
+        drop(external);
+        let preview_request = RequestId::random();
         let delta = vault
-            .preview_namespace_move(owner, namespace, Some(broader_parent), 1_800_000_016_000)
+            .preview_namespace_move(
+                owner,
+                namespace,
+                Some(broader_parent),
+                preview_request,
+                1_800_000_016_000,
+            )
             .unwrap_or_else(|error| panic!("move delta must preview: {error}"));
         assert_eq!(delta.len(), 1);
         assert_eq!(delta[0].principal_id, service);
@@ -1807,6 +1893,16 @@ mod tests {
                 && event.credential_id
                     == Some(ObjectId::from_uuid(service_auth.credential_id().as_uuid()))
                 && event.commitment_version == 2
+        }));
+        assert!(audit.iter().any(|event| {
+            event.request_id == absent_request
+                && event.target_id == Some(absent_target)
+                && event.outcome == "denied"
+        }));
+        assert!(audit.iter().any(|event| {
+            event.request_id == preview_request
+                && event.action == Action::EffectiveAccessRead.as_str()
+                && event.outcome == "allowed"
         }));
     }
 }

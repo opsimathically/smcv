@@ -83,3 +83,22 @@ findings repaired and retested**.
 Validation includes focused authentication/service-identity regressions, the
 complete server integration suite, strict all-feature Clippy, and the full
 repository gate. No Pass 3 critical/high finding remains open.
+
+## Pass 4 — authorization, enumeration resistance, and audit integrity
+
+Perspective: a service probing unknown object IDs, a revoked credential
+holder, an offline hierarchy editor, a stale request-context holder, and an
+auditor relying on the decision trail. Result: **four findings repaired and
+retested**.
+
+| ID | Severity | Finding | Repair and verification |
+|---|---|---|---|
+| A10-R4-001 | High | Namespace move-impact preview validated the owner session but bypassed the centralized authorization/audit decision. Its delta calculation also consumed namespace ancestry without authenticating the keyed state of the moved namespace, proposed parent, or intervening ancestors. An offline hierarchy edit could therefore make the preview report an untrusted access delta even though final mutation later failed. | Preview now enters `effective-access:read` with request correlation and resolves both old and proposed ancestry through the commitment-verifying resource boundary. A regression corrupts the proposed parent's state commitment and proves preview fails; the valid preview is audited and the final move still recalculates under the write gate. |
+| A10-R4-002 | Medium | Service authorization used `?` while resolving a target. An absent target returned `Denied` before the common audit append, so unknown-object probes escaped the denial trail even though no-grant denials were recorded. | Expected absent-target `Denied` is now normalized into the common decision result before audit construction; integrity and infrastructure errors still fail closed without being mislabeled. Regression coverage correlates the absent opaque target and request ID to a committed denied event. |
+| A10-R4-003 | Medium | Authentication rejected a known wrong-secret, revoked, expired, or backward-time application credential without an audit event, contradicting the credential-compromise and audit requirements. | Application authentication now accepts request correlation and appends a `credential:authenticate` denial for durable known credentials. The event carries the opaque credential reference but no actor principal, because a rejected claimant is not authenticated. Unknown random lookups remain unaudited to avoid attacker-controlled durable cardinality. Revoked-attempt coverage verifies the exact event. |
+| A10-R4-004 | Medium | Revalidation of a copied `AuthenticatedService` checked revocation and upper expiry but not credential creation/last-use lower bounds. Code using the application facade could therefore authorize that context at a time earlier than durable authentication state. | Service-context revalidation now rejects time before credential creation or committed last use. The authorization matrix regression attempts the rollback and fails before constructing `AuthorizedVault`. |
+
+Validation includes offline hierarchy corruption, absent-resource denial
+attribution, revoked-credential denial attribution, service-context rollback,
+the complete application/server suites, strict all-feature Clippy, and the
+full repository gate. No Pass 4 critical/high finding remains open.

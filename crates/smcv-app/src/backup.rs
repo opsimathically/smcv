@@ -1823,6 +1823,7 @@ mod tests {
         );
         let restored_service = restored.authenticate_application_credential(
             &application_credential.plaintext,
+            RequestId::random(),
             1_800_000_000_014,
         )?;
         assert_eq!(restored_service.principal_id(), service_id);
@@ -1849,6 +1850,7 @@ mod tests {
             revoked
                 .authenticate_application_credential(
                     &application_credential.plaintext,
+                    RequestId::random(),
                     1_800_000_000_018,
                 )
                 .is_err()
