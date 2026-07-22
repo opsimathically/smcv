@@ -4,6 +4,11 @@ set -eu
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 version=$(sed -n 's/^version = "\([^"]*\)"/\1/p' "$repository/Cargo.toml" | head -n 1)
 target=$(rustc -vV | sed -n 's/^host: //p')
+required_target=x86_64-unknown-linux-gnu
+[ "$target" = "$required_target" ] || {
+  echo "v1 release construction supports only $required_target (found $target)" >&2
+  exit 1
+}
 commit=$(git -C "$repository" rev-parse HEAD)
 working_tree_dirty=false
 if [ -n "$(git -C "$repository" status --porcelain --untracked-files=normal)" ]; then
@@ -24,16 +29,16 @@ trap cleanup EXIT HUP INT TERM
 
 bundle="smcv-${version}-${target}"
 stage="$temporary/$bundle"
-mkdir -p "$stage/bin" "$stage/docs" "$stage/packaging" "$stage/sbom"
+mkdir -p "$stage/bin" "$stage/packaging" "$stage/sbom" "$stage/scripts"
 
 cd "$repository"
 SOURCE_DATE_EPOCH=$source_epoch cargo build --locked --release --workspace
 install -m 0755 target/release/smcv-cli "$stage/bin/smcv-cli"
 install -m 0755 target/release/smcv-server "$stage/bin/smcv-server"
-cp LICENSE README.md SECURITY.md "$stage/"
-cp ai_context_documentation/BACKUP_AND_RECOVERY.md "$stage/docs/"
-cp ai_context_documentation/OPERATIONS_AND_SECURITY.md "$stage/docs/"
+cp Cargo.lock Cargo.toml CONTRIBUTING.md deny.toml LICENSE README.md SECURITY.md rust-toolchain.toml "$stage/"
+cp -R ai_context_documentation ai_design_guidelines ai_phase_evidence ai_phased_plans api docs external_assurance "$stage/"
 cp -R packaging/. "$stage/packaging/"
+cp scripts/build-release.sh scripts/release-candidate-smoke.sh scripts/verify-release.sh "$stage/scripts/"
 cargo cyclonedx --quiet --manifest-path Cargo.toml --format json --all --override-filename smcv-release
 for crate in smcv-app smcv-backup smcv-cli smcv-core smcv-crypto smcv-server smcv-storage; do
   cp "crates/$crate/smcv-release.json" "$stage/sbom/$crate.cdx.json"

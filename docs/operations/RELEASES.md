@@ -7,8 +7,9 @@ tree by default so provenance cannot silently attribute uncommitted code to
 `HEAD`. `SMCV_ALLOW_DIRTY_BUILD=1` exists only to test the release envelope and
 marks that fact in provenance; normal verification rejects such an artifact.
 The builder performs a
-locked optimized workspace build, collects the CLI/server and operational
-documents, creates one CycloneDX JSON SBOM per crate, normalizes generated SBOM
+locked optimized workspace build, collects the CLI/server, lockfile/toolchain,
+API, complete documentation/evidence, and external-assurance handoff, creates
+one CycloneDX JSON SBOM per crate, normalizes generated SBOM
 time/serial fields to the source epoch, writes local provenance, hashes every
 internal file, and creates a sorted owner-normalized gzip tarball. Repeated
 builds from the same checkout and source epoch must have the same SHA-256.

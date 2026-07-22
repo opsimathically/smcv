@@ -1,9 +1,11 @@
 # Requirements traceability
 
-Status: **Planned ownership baseline**
+Status: **Implementation ownership complete**
 Last reviewed: 2026-07-21
 
-This matrix assigns implementation and final-verification ownership. It does not
+This matrix records implementation and final-verification ownership. The
+[completed evidence matrix](../ai_phase_evidence/FINAL_REQUIREMENTS_TRACEABILITY.md)
+links every row to delivered proof. This file does not
 replace the full acceptance language in `PRODUCT_REQUIREMENTS.md` or phase
 plans. A requirement may span phases; the final owner cannot close it until all
 earlier evidence is linked.

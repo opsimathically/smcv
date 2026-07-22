@@ -10,6 +10,8 @@ const evidenceDirectory = path.join(repository, "ai_phase_evidence", "phase_4_br
 const syntheticPassword = "synthetic browser owner password";
 const syntheticSecret = "synthetic-browser-secret-value";
 const screenReaderMode = process.env.SMCV_SCREEN_READER === "1";
+const serverEnvironment = { ...process.env };
+delete serverEnvironment.SMCV_SCREEN_READER;
 const temporary = await mkdtemp(path.join(os.tmpdir(), "smcv-browser-"));
 const children = [];
 let sessionId = null;
@@ -56,6 +58,7 @@ async function waitFor(url, attempts = 100) {
 async function webdriver(method, endpoint, body) {
   const response = await fetch(`http://127.0.0.1:${driverPort}${endpoint}`, {
     method,
+    signal: AbortSignal.timeout(15_000),
     headers: body === undefined ? {} : { "Content-Type": "application/json" },
     body: body === undefined ? undefined : JSON.stringify(body),
   });
@@ -130,7 +133,7 @@ try {
 
   child(path.join(repository, "target/debug/smcv-server"), [], {
     env: {
-      ...process.env,
+      ...serverEnvironment,
       SMCV_LISTEN_ADDR: `127.0.0.1:${serverPort}`,
       SMCV_DATA_DIR: dataDirectory,
       SMCV_KEY_DIR: keyDirectory,
@@ -299,6 +302,9 @@ try {
     if (process.exitCode === null) {
       try { process.kill("SIGTERM"); } catch (_error) { /* Snap-managed browser helpers may reject direct signals. */ }
     }
+    process.stdout?.destroy();
+    process.stderr?.destroy();
+    process.unref();
   }
   await rm(temporary, { recursive: true, force: true });
 }

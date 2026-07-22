@@ -50,9 +50,10 @@ practice, but must not describe those controls as complete protection.
 ### Client to ingress
 
 All client input is untrusted. TLS authenticates the server and protects
-transport; it does not make request contents safe. Reverse-proxy identity
-headers are ignored unless a specific trusted-proxy configuration pins the
-proxy source and header-clearing behavior.
+transport; it does not make request contents safe. V1 does not trust forwarded
+identity or source-address headers. The supported same-host proxy overwrites
+forwarding headers, while SMCV derives enforcement identity from its direct
+loopback peer and rejects trusted-proxy mode.
 
 ### Ingress to domain
 
@@ -105,7 +106,7 @@ payload before records become usable.
 | Malformed archive DoS | Size/count/depth limits; streaming parser; authenticated manifest; bounded KDF choices; reject duplicate IDs and chunks. |
 | Partial restore | Stage into a new database; validate all invariants; atomic activation only after verification; retain failure report without secrets. |
 | Disk-full/power loss | Short transactions; durability settings; crash testing; SQLite integrity checks; verified backup/restore drills. |
-| Dependency compromise | Minimal dependencies; lockfile; source review for critical crypto/auth/parser crates; vulnerability scanning; SBOM and signed provenance. |
+| Dependency compromise | Minimal dependencies; lockfile; source review for critical crypto/auth/parser crates; vulnerability scanning; SBOM, checksums, and local provenance; optional detached publication signing. |
 
 ## Abuse cases that must be tested
 

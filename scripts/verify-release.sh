@@ -31,8 +31,13 @@ root=$(find "$temporary" -mindepth 1 -maxdepth 1 -type d)
   else
     jq -e '.schema == "smcv.local-provenance.v1" and .builder == "local-cargo-locked" and (.working_tree_dirty == false) and (.external_signing == false)' PROVENANCE.json >/dev/null
   fi
-  jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' sbom/smcv-cli.cdx.json >/dev/null
-  jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' sbom/smcv-server.cdx.json >/dev/null
+  for crate in smcv-app smcv-backup smcv-cli smcv-core smcv-crypto smcv-server smcv-storage; do
+    jq -e '.bomFormat == "CycloneDX" and (.components | length > 0)' "sbom/$crate.cdx.json" >/dev/null
+  done
+  test -f Cargo.lock
+  test -f external_assurance/README.md
+  test -f docs/RELEASE_NOTES_0.1.0.md
+  test -f ai_phase_evidence/FINAL_REQUIREMENTS_TRACEABILITY.md
   bin/smcv-cli --version >/dev/null
 )
 

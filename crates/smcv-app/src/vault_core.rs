@@ -1596,6 +1596,7 @@ pub(crate) fn map_storage(error: StorageError) -> VaultError {
 mod tests {
     use std::fs;
 
+    use proptest::prelude::*;
     use rusqlite::Connection;
     use smcv_core::{ProtectedBytes, ProtectedString, RequestId, SecretSchedule};
     use tempfile::TempDir;
@@ -1619,6 +1620,16 @@ mod tests {
             description: Some(ProtectedString::new(String::from(description))),
             username: None,
             tags: Vec::new(),
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_metadata_envelopes_never_panic(
+            bytes in prop::collection::vec(any::<u8>(), 0..8192),
+            expected_kind in any::<u8>(),
+        ) {
+            let _ = super::decode_metadata(ProtectedBytes::new(bytes), expected_kind);
         }
     }
 

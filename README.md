@@ -5,10 +5,12 @@ vault written in Rust. It gives people a polished web interface for managing
 encrypted secrets and gives applications narrowly scoped, revocable API
 access to only the secrets and operations they require.
 
-The project is under active implementation. The encrypted vault core,
-authenticated `/api/v1` surface, portable backup/recovery tooling, owner web
-interface, and Linux operational packaging are complete. Final integrated
-release-candidate assurance remains, so it is not production-ready.
+Development of the local SMCV 0.1.0 release candidate is complete. The
+encrypted vault core, authenticated `/api/v1` surface, portable backup/recovery
+tooling, owner web interface, Linux operational packaging, and final integrated
+assurance have passed their internal evidence gates. Public publication,
+production deployment, independent assurance, and the owner's real custody
+exercise remain post-development activities.
 
 ## Committed product direction
 
@@ -36,6 +38,9 @@ release-candidate assurance remains, so it is not production-ready.
 - [Backup operations](docs/operations/BACKUP_AND_RECOVERY_OPERATIONS.md)
 - [Upgrade and rollback](docs/operations/UPGRADE_AND_ROLLBACK.md)
 - [Incident runbooks](docs/operations/INCIDENT_RUNBOOKS.md)
+- [Supported platform](docs/SUPPORTED_PLATFORMS.md)
+- [Release notes](docs/RELEASE_NOTES_0.1.0.md)
+- [External-assurance handoff](external_assurance/README.md)
 
 ## Current status
 
@@ -45,18 +50,19 @@ core](ai_phase_evidence/PHASE_1_EXIT_REPORT.md), [Phase 2 authenticated
 API](ai_phase_evidence/PHASE_2_EXIT_REPORT.md), [Phase 3 portable backup and
 recovery](ai_phase_evidence/PHASE_3_EXIT_REPORT.md), and [Phase 4 web product
 and accessibility](ai_phase_evidence/PHASE_4_EXIT_REPORT.md), and [Phase 5
-operational hardening](ai_phase_evidence/PHASE_5_EXIT_REPORT.md) passed their
-adversarial evidence gates on 2026-07-21. [Phase 6 release
-readiness](ai_phased_plans/PHASE_06_RELEASE_READINESS.md) is active. Run the
-complete local verification gate with:
+operational hardening](ai_phase_evidence/PHASE_5_EXIT_REPORT.md), and [Phase 6
+release readiness](ai_phase_evidence/PHASE_6_EXIT_REPORT.md) passed their
+adversarial evidence gates on 2026-07-21. Run the complete repository gate with:
 
 ```sh
 ./scripts/check.sh
 ```
 
+The clean candidate boundary additionally runs `./scripts/final-release-gate.sh`.
+
 Phases 0–6 are designed to run continuously under one implementation goal.
 There is no pilot, beta, external-user, adoption, owner-approval, or external
 review gate. Failed checks create repair/retest work inside the same goal.
-Phase 6 produces a production-ready release candidate and post-development
-security-assurance handoff; public deployment and personal recovery-key custody
-testing remain later owner-controlled activities.
+Phase 6 produced a production-ready local release candidate and
+post-development security-assurance handoff; public deployment and personal
+recovery-key custody testing remain later owner-controlled activities.

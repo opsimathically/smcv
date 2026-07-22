@@ -1021,6 +1021,7 @@ mod tests {
         os::unix::fs::{PermissionsExt, symlink},
     };
 
+    use proptest::prelude::*;
     use smcv_core::{
         AuditEventId, InstallationId, NamespaceId, ObjectId, ProtectedBytes, ProtectedString,
         RequestId, VaultId,
@@ -1032,7 +1033,8 @@ mod tests {
     use super::{
         AuditCommitmentInput, CryptoError, KeyMaterial, ObjectKind, RecordContext, SealedRecord,
         audit_commitment, exact_name_index, issue_session, issue_token, open, seal_with_nonce,
-        session_lookup_id, state_commitment, verify_csrf, verify_session, verify_token,
+        session_lookup_id, state_commitment, token_lookup_id, verify_csrf, verify_session,
+        verify_token,
     };
     #[cfg(unix)]
     use super::{create_root_key_file, load_root_key_file};
@@ -1050,6 +1052,23 @@ mod tests {
                 0x0123_4567_89ab_cdef_fedc_ba98_7654_3210,
             )),
             object_version: version,
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn arbitrary_encoded_credentials_never_panic(bytes in prop::collection::vec(any::<u8>(), 0..2048)) {
+            let candidate = String::from_utf8_lossy(&bytes);
+            let key = KeyMaterial::new([0x51; 32]);
+            let expected_lookup = [0x52; super::SESSION_LOOKUP_LENGTH];
+            let session_verifier = super::SessionVerifier([0x53; 32]);
+            let token_verifier = super::TokenVerifier([0x54; 32]);
+
+            let _ = token_lookup_id(&candidate);
+            let _ = session_lookup_id(&candidate);
+            let _ = verify_session(&key, &candidate, &expected_lookup, &session_verifier);
+            let _ = verify_csrf(&key, &candidate, &expected_lookup, &session_verifier);
+            let _ = verify_token(&key, &candidate, "synthetic-lookup", &token_verifier);
         }
     }
 

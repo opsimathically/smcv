@@ -41,7 +41,6 @@ completing development before independent external security assurance.
 
 The following are explicitly post-development and non-blocking:
 
-- Owner custody testing with real recovery material.
-- Independent external security assurance and resulting iterations.
-- Official release-signing identity custody.
-- Public publication and production deployment decisions.
+- [Owner custody testing with real recovery material](HT-002-real-recovery-custody-exercise.md).
+- [Independent external security assurance and resulting iterations](HT-001-independent-security-assurance.md).
+- [Official signing, publication, and production deployment](HT-003-signing-publication-and-deployment.md).

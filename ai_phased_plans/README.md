@@ -1,12 +1,12 @@
 # SMCV implementation phases
 
-Status: **Phase 6 active; Phases 0–5 passed**
+Status: **Phases 0–6 passed; development complete**
 Last reviewed: 2026-07-21
 
-## Active phase
+## Completion state
 
-The active phase is [Phase 6: release readiness](PHASE_06_RELEASE_READINESS.md).
-[Phase 5](PHASE_05_OPERATIONS.md) passed its evidence gate on 2026-07-21.
+The [Phase 6 release-readiness](PHASE_06_RELEASE_READINESS.md) evidence gate
+passed on 2026-07-21, completing the dependency-ordered development plan.
 Requirement ownership is tracked in the
 [requirements traceability matrix](REQUIREMENTS_TRACEABILITY.md).
 

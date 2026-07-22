@@ -24,6 +24,8 @@ survive individual work sessions. Decision status is governed by
 - [Portable archive format version 1](PORTABLE_ARCHIVE_FORMAT_V1.md)
 - [Operations and security](OPERATIONS_AND_SECURITY.md)
 - [Security assurance](SECURITY_ASSURANCE.md)
+- [Residual-risk register](RESIDUAL_RISK_REGISTER.md)
+- [Dependency and unsafe review](DEPENDENCY_AND_UNSAFE_REVIEW.md)
 - [Operational procedures](../docs/operations/DEPLOYMENT.md)
 - [Incident runbooks](../docs/operations/INCIDENT_RUNBOOKS.md)
 - [Release construction](../docs/operations/RELEASES.md)
@@ -33,6 +35,7 @@ survive individual work sessions. Decision status is governed by
 - [Security adversarial review](reviews/SECURITY_ADVERSARIAL_REVIEW.md)
 - [Operability, scope, and recovery review](reviews/OPERABILITY_SCOPE_RECOVERY_REVIEW.md)
 - [Review resolution log](reviews/REVIEW_RESOLUTION_LOG.md)
+- [Final internal assurance](reviews/FINAL_INTERNAL_ASSURANCE.md)
 - [Authoritative references](AUTHORITATIVE_REFERENCES.md)
 
 ## Update rules
