@@ -1693,6 +1693,57 @@ mod tests {
     }
 
     #[test]
+    fn wall_clock_rollback_preserves_sequence_and_authenticated_audit_evidence() {
+        let directory =
+            TempDir::new().unwrap_or_else(|error| panic!("synthetic directory must open: {error}"));
+        let vault = initialize_vault(
+            &directory.path().join("database/vault.sqlite"),
+            &directory.path().join("provider/root.key"),
+            1_800_000_000_000,
+        )
+        .unwrap_or_else(|error| panic!("synthetic vault must initialize: {error}"));
+        let namespace = vault
+            .create_namespace(
+                None,
+                &metadata("clock-rollback", "synthetic"),
+                operation(1_800_000_010_000),
+            )
+            .unwrap_or_else(|error| panic!("namespace must create: {error}"));
+        let secret = vault
+            .create_secret(
+                namespace,
+                &metadata("time-safe-secret", "synthetic"),
+                ProtectedBytes::new(b"synthetic-before-clock-rollback".to_vec()),
+                operation(1_800_000_010_100),
+            )
+            .unwrap_or_else(|error| panic!("secret must create: {error}"));
+        vault
+            .update_secret(
+                secret.secret_id,
+                1,
+                1,
+                ProtectedBytes::new(b"synthetic-after-clock-rollback".to_vec()),
+                operation(1_799_999_000_000),
+            )
+            .unwrap_or_else(|error| panic!("clock rollback update must remain safe: {error}"));
+
+        let records = vault
+            .store
+            .audit_records_after(0, 10)
+            .unwrap_or_else(|error| panic!("audit records must load: {error}"));
+        assert_eq!(records.len(), 3);
+        assert!(records[2].occurred_at_unix_ms < records[1].occurred_at_unix_ms);
+        assert_eq!(records[2].sequence, records[1].sequence + 1);
+        assert_eq!(
+            vault
+                .verify_audit_chain()
+                .unwrap_or_else(|error| panic!("audit chain must verify: {error}"))
+                .events_verified,
+            3
+        );
+    }
+
+    #[test]
     fn namespace_names_are_unique_at_root_and_hierarchy_depth_is_bounded() {
         let directory =
             TempDir::new().unwrap_or_else(|error| panic!("synthetic directory must open: {error}"));

@@ -6,7 +6,10 @@ use std::{
     collections::HashMap,
     net::{IpAddr, Ipv4Addr, SocketAddr},
     path::Path,
-    sync::{Arc, Mutex},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU64, Ordering},
+    },
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -39,6 +42,7 @@ use uuid::Uuid;
 use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 
 mod backup_jobs;
+pub mod operations;
 mod web;
 
 const SESSION_COOKIE: &str = "__Host-smcv_session";
@@ -105,6 +109,19 @@ pub struct ApiState {
     login_rate_limiter: Arc<LoginRateLimiter>,
     bearer_rate_limiter: Arc<LoginRateLimiter>,
     backup_jobs: Arc<backup_jobs::BackupJobRegistry>,
+    metrics: Arc<OperationalMetrics>,
+}
+
+#[derive(Default)]
+struct OperationalMetrics {
+    requests: AtomicU64,
+    responses_success: AtomicU64,
+    responses_client_error: AtomicU64,
+    responses_server_error: AtomicU64,
+    timeouts: AtomicU64,
+    rate_limited: AtomicU64,
+    readiness_checks: AtomicU64,
+    readiness_failures: AtomicU64,
 }
 
 impl ApiState {
@@ -136,6 +153,7 @@ impl ApiState {
             login_rate_limiter: Arc::new(LoginRateLimiter::default()),
             bearer_rate_limiter: Arc::new(LoginRateLimiter::default()),
             backup_jobs: Arc::new(backup_jobs),
+            metrics: Arc::new(OperationalMetrics::default()),
         })
     }
 
@@ -250,7 +268,14 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/openapi.json", get(openapi))
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT))
-        .layer(middleware::from_fn(enforce_request_timeout))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            record_operational_metrics,
+        ))
+        .layer(middleware::from_fn_with_state(
+            state.clone(),
+            enforce_request_timeout,
+        ))
         .layer(ConcurrencyLimitLayer::new(128))
         .layer(middleware::from_fn(enforce_header_limits))
         .layer(middleware::from_fn_with_state(
@@ -275,15 +300,47 @@ pub fn router(state: ApiState) -> Router {
         .with_state(state)
 }
 
-async fn enforce_request_timeout(request: Request<axum::body::Body>, next: Next) -> Response {
+/// Builds the optional loopback-only operational telemetry router.
+pub fn operational_router(state: ApiState) -> Router {
+    Router::new()
+        .route("/metrics", get(operations::metrics))
+        .route("/health/live", get(live))
+        .route("/health/ready", get(ready))
+        .layer(middleware::from_fn(enforce_header_limits))
+        .with_state(state)
+}
+
+async fn record_operational_metrics(
+    State(state): State<ApiState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    state.metrics.requests.fetch_add(1, Ordering::Relaxed);
+    let response = next.run(request).await;
+    match response.status().as_u16() / 100 {
+        2 | 3 => &state.metrics.responses_success,
+        4 => &state.metrics.responses_client_error,
+        _ => &state.metrics.responses_server_error,
+    }
+    .fetch_add(1, Ordering::Relaxed);
+    response
+}
+
+async fn enforce_request_timeout(
+    State(state): State<ApiState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
     let duration = if request.uri().path() == "/api/v1/backup-verifications" {
         Duration::from_secs(15 * 60)
     } else {
         Duration::from_secs(15)
     };
-    match tokio::time::timeout(duration, next.run(request)).await {
-        Ok(response) => response,
-        Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
+    if let Ok(response) = tokio::time::timeout(duration, next.run(request)).await {
+        response
+    } else {
+        state.metrics.timeouts.fetch_add(1, Ordering::Relaxed);
+        StatusCode::REQUEST_TIMEOUT.into_response()
     }
 }
 
@@ -306,6 +363,7 @@ async fn enforce_bearer_rate_limit(
             .bearer_rate_limiter
             .allow(source, now_unix_ms(), BEARER_ATTEMPTS_PER_WINDOW)
         {
+            state.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
             return ApiError::rate_limited(request_id(request.headers())).into_response();
         }
     }
@@ -336,9 +394,17 @@ async fn live() -> Json<StatusResponse> {
 }
 
 async fn ready(State(state): State<ApiState>) -> Result<Json<StatusResponse>, ApiError> {
+    state
+        .metrics
+        .readiness_checks
+        .fetch_add(1, Ordering::Relaxed);
     if state.vault.store.quick_integrity_check().unwrap_or(false) {
         Ok(Json(StatusResponse { status: "ready" }))
     } else {
+        state
+            .metrics
+            .readiness_failures
+            .fetch_add(1, Ordering::Relaxed);
         Err(ApiError::unavailable(RequestId::random()))
     }
 }
@@ -2247,7 +2313,7 @@ mod tests {
     use tempfile::TempDir;
     use tower::ServiceExt as _;
 
-    use super::{ApiState, REQUEST_BODY_LIMIT, enroll_local_owner, router};
+    use super::{ApiState, REQUEST_BODY_LIMIT, enroll_local_owner, operational_router, router};
 
     fn state() -> (TempDir, ApiState) {
         let root =
@@ -2976,6 +3042,42 @@ mod tests {
             .unwrap_or_else(|error| panic!("saturation request must respond: {error}"));
         assert_eq!(response.status(), 429);
         drop(permits);
+    }
+
+    #[tokio::test]
+    async fn operational_metrics_are_fixed_cardinality_and_contain_no_input() {
+        let (_root, state) = state();
+        let sentinel = "synthetic-metric-sentinel";
+        let request = Request::builder()
+            .uri(format!("/missing/{sentinel}"))
+            .body(Body::empty())
+            .unwrap_or_else(|error| panic!("synthetic request must build: {error}"));
+        let response = router(state.clone())
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|error| panic!("synthetic request must respond: {error}"));
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let metrics = operational_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/metrics")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("metrics request must build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("metrics request must respond: {error}"));
+        assert_eq!(metrics.status(), StatusCode::OK);
+        let body = to_bytes(metrics.into_body(), 16 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("metrics body must read: {error}"));
+        let body = String::from_utf8(body.to_vec())
+            .unwrap_or_else(|error| panic!("metrics body must be text: {error}"));
+        assert!(body.contains("smcv_http_requests_total 1"));
+        assert!(body.contains("class=\"client_error\""));
+        assert!(!body.contains(sentinel));
+        assert!(!body.contains("route="));
+        assert!(!body.contains("vault_id"));
     }
 
     #[test]

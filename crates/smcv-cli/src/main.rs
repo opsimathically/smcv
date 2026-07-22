@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::panic))]
 
 use std::{
     error::Error,
@@ -16,6 +17,7 @@ use smcv_backup::{ArchiveKey, KeyMode, RecoveryKey};
 use smcv_core::{ProtectedString, RequestId};
 use zeroize::Zeroizing;
 
+mod operations;
 mod recovery_web;
 
 #[derive(Debug, Parser)]
@@ -29,6 +31,8 @@ struct Cli {
 enum Command {
     /// Prints safe local build diagnostics.
     Diagnostics,
+    /// Generates one display-once backup recovery key for protected redirection.
+    BackupKeyGenerate,
     /// Initializes or verifies local encrypted vault custody.
     Init {
         /// `SQLite` vault path in its restrictive data directory.
@@ -112,6 +116,31 @@ enum Command {
         #[arg(long)]
         root_key: PathBuf,
     },
+    /// Creates a verified scheduled backup and safely applies count retention.
+    BackupMaintain {
+        #[arg(long)]
+        database: PathBuf,
+        #[arg(long)]
+        root_key: PathBuf,
+        #[arg(long)]
+        output_directory: PathBuf,
+        /// Read the scheduled recovery key from an inherited protected descriptor.
+        #[arg(long, value_name = "FD")]
+        key_fd: u32,
+        /// Number of fully verified copies to retain.
+        #[arg(long, default_value_t = 7)]
+        retain: usize,
+    },
+    /// Restores one archive into an isolated temporary vault and removes it.
+    BackupRestoreDrill {
+        #[arg(long)]
+        archive: PathBuf,
+        #[arg(long)]
+        workspace: PathBuf,
+        /// Read protected archive key material from an inherited descriptor.
+        #[arg(long, value_name = "FD")]
+        key_fd: u32,
+    },
 }
 
 enum SuppliedKey {
@@ -137,8 +166,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match Cli::parse().command {
         Command::Diagnostics => {
             println!("smcv_version={}", BuildInfo::current().version);
-            println!("implementation_phase=5");
+            println!("implementation_phase=6");
             println!("production_ready=false");
+        }
+        Command::BackupKeyGenerate => {
+            let recovery = RecoveryKey::generate()?;
+            println!("{}", recovery.expose_once());
         }
         Command::Init { database, root_key } => {
             let vault = initialize_vault(&database, &root_key, now_unix_ms())?;
@@ -195,7 +228,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 if passphrase {
                     return Err("passphrase and key-fd cannot be combined".into());
                 }
-                SuppliedKey::Recovery(RecoveryKey::parse(&read_key_fd(descriptor)?)?)
+                let encoded = read_key_fd(descriptor)?;
+                reject_known_fixture_key(&encoded)?;
+                SuppliedKey::Recovery(RecoveryKey::parse(&encoded)?)
             } else if passphrase {
                 SuppliedKey::Passphrase(prompt_confirmed_passphrase()?)
             } else {
@@ -270,6 +305,55 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
         Command::BackupRestoreBrowser { database, root_key } => {
             recovery_web::run(database, root_key).await?;
+        }
+        Command::BackupMaintain {
+            database,
+            root_key,
+            output_directory,
+            key_fd,
+            retain,
+        } => {
+            let encoded = read_key_fd(key_fd)?;
+            reject_known_fixture_key(&encoded)?;
+            let recovery = RecoveryKey::parse(&encoded)?;
+            let vault = initialize_vault(&database, &root_key, now_unix_ms())?;
+            let report = operations::maintain_backups(
+                &vault,
+                &output_directory,
+                ArchiveKey::Recovery(&recovery),
+                retain,
+                now_unix_ms(),
+            )?;
+            println!("archive_id={}", report.archive_id);
+            println!("verified_copies={}", report.verified_copies);
+            println!("removed_verified_copies={}", report.removed_verified_copies);
+            println!(
+                "unverified_files_retained={}",
+                report.unverified_files_retained
+            );
+            if report.unverified_files_retained > 0 {
+                return Err(
+                    "one or more backup files failed verification and were retained".into(),
+                );
+            }
+            println!("status=verified-retention-applied");
+        }
+        Command::BackupRestoreDrill {
+            archive,
+            workspace,
+            key_fd,
+        } => {
+            let header = InitializedVault::inspect_backup_file(&archive)?;
+            let key = obtain_existing_key(header.key_mode, Some(key_fd))?;
+            let report =
+                operations::restore_drill(&archive, &workspace, key.archive_key(), now_unix_ms())?;
+            println!("archive_id={}", report.archive_id);
+            println!("recovery_epoch={}", report.recovery_epoch);
+            println!(
+                "disabled_source_bound_authenticators={}",
+                report.disabled_source_bound_authenticators
+            );
+            println!("status=restore-drill-passed-and-cleaned");
         }
     }
     Ok(())
@@ -346,6 +430,15 @@ fn require_confirmation(prompt: &str, expected: &str) -> Result<(), Box<dyn Erro
     io::stdin().read_line(&mut response)?;
     if response.trim() != expected {
         return Err("confirmation was not accepted".into());
+    }
+    Ok(())
+}
+
+fn reject_known_fixture_key(encoded: &str) -> Result<(), Box<dyn Error>> {
+    const COMMITTED_FIXTURE_KEY: &str =
+        "smcvbrk_v1.M6_qs6hHm50zrqXxU3vlWWCdK8FWcnIhAkiuqMnITp0.83d973d9";
+    if encoded == COMMITTED_FIXTURE_KEY {
+        return Err("the committed compatibility-fixture key cannot protect a new backup".into());
     }
     Ok(())
 }

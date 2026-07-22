@@ -1,12 +1,13 @@
 # Operations and security
 
-Status: **Committed operational outcomes; proposed defaults**
+Status: **Committed Phase 5 Linux operational baseline**
 Last reviewed: 2026-07-21
 
 ## Supported environment
 
 - One SMCV server per vault.
-- Supported stable OS platforms and filesystems are declared before release.
+- The v1 release candidate supports x86-64 Linux with systemd and local ext4 or
+  XFS. Other platforms and supervisors require their own evidence.
 - SQLite and its WAL/journal files reside on a local filesystem with reliable
   locking and durability semantics.
 - SMCV runs as a dedicated unprivileged OS account with no interactive shell
@@ -55,15 +56,17 @@ exists. Bootstrap values do not enter process lists or durable logs.
 
 ## Configuration
 
-- Configuration has a typed schema, explicit defaults, and unknown-key errors.
+- Configuration has a closed environment schema, explicit development
+  defaults, and unknown-`SMCV_*` errors.
 - Security-sensitive settings state whether they are static, reloadable, or
   require maintenance mode.
 - Secret configuration values use files/file descriptors or key providers, not
   ordinary checked-in configuration.
 - Startup prints effective safe configuration without protected values.
 - Production refuses non-loopback plaintext binding.
-- Trusted proxy mode pins source addresses/hops and defines forwarded-header
-  clearing; it is disabled by default.
+- Trusted forwarding-header mode is not supported in v1 and any configured
+  proxy trust is rejected. The same-host ingress clears `Forwarded` and
+  `X-Forwarded-*`; rate limits use the direct peer.
 
 ## TLS and network
 
@@ -100,8 +103,11 @@ response bodies, raw URLs/query strings, secret names, user-submitted labels,
 authentication headers, cookies, key material, ciphertext, or decrypted data.
 Potentially attacker-controlled safe fields are length-bounded and sanitized.
 
-Metrics use low-cardinality static labels and opaque aggregate counts. Useful
-signals include:
+The delivered optional metrics listener is independently loopback-only and uses
+fixed labels. It exposes readiness and aggregate request response-class,
+timeout, rate-limit, and readiness-check counters. Host/systemd monitoring owns
+filesystem, WAL, scheduled backup age, and service signals. The broader useful
+signal catalog includes:
 
 - Authentication and authorization outcomes by safe category.
 - Credential revocation/expiration attempts.
@@ -195,6 +201,9 @@ threshold alerts account for database, WAL, verified backup jobs, and restore
 staging. Ephemeral encrypted artifacts have deterministic expiry and cleanup,
 while durable history requires an owner-visible retention decision.
 
-Before release, establish target recovery point and recovery time objectives
-for representative deployments and show that backup frequency and restore
-performance meet them.
+The reference small-vault target is a 24-hour RPO and 15-minute RTO for up to 16
+MiB total protected payload on the measured reference hardware. The daily timer
+and isolated restore drill meet that target. Larger deployments must measure
+their own RTO rather than treating parser ceilings as a latency promise. Exact
+limits and dated results are in
+[`docs/operations/TELEMETRY_AND_CAPACITY.md`](../docs/operations/TELEMETRY_AND_CAPACITY.md).

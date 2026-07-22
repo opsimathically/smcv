@@ -7,10 +7,11 @@ cargo test --workspace --all-features
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
 cargo audit
 cargo deny check
+sh -n scripts/*.sh
 
 token_prefix='smcv_v1\.'
 secret_pattern="-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|${token_prefix}[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{43}"
-if rg -n -g '*.{rs,toml,md,json,yaml,yml}' -g '!target/**' -- \
+if rg -n -g '*.{rs,toml,md,json,yaml,yml,js,html,css,sh,service,timer,conf,example}' -g '!target/**' -g '!dist/**' -g '!scripts/check.sh' -- \
   "$secret_pattern" .; then
   echo "possible committed secret pattern detected" >&2
   exit 1

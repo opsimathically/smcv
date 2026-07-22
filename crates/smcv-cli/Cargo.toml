@@ -18,6 +18,7 @@ smcv-app = { version = "=0.1.0", path = "../smcv-app" }
 smcv-backup = { version = "=0.1.0", path = "../smcv-backup" }
 smcv-core = { version = "=0.1.0", path = "../smcv-core" }
 subtle.workspace = true
+tempfile.workspace = true
 tokio.workspace = true
 uuid.workspace = true
 zeroize.workspace = true
@@ -26,5 +27,4 @@ zeroize.workspace = true
 workspace = true
 
 [dev-dependencies]
-tempfile.workspace = true
 tower.workspace = true

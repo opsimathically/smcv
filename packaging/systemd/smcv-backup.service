@@ -1,0 +1,31 @@
+[Unit]
+Description=Create, verify, and retain SMCV portable backups
+After=smcv.service
+
+[Service]
+Type=oneshot
+User=smcv
+Group=smcv
+UMask=0077
+LoadCredential=backup-key:/etc/smcv/backup.key
+StateDirectory=smcv smcv-key
+StateDirectoryMode=0700
+ReadWritePaths=/var/backups/smcv
+ExecStart=/bin/sh -c 'exec 3<"${CREDENTIALS_DIRECTORY}/backup-key"; exec /usr/local/lib/smcv/smcv-cli backup-maintain --database /var/lib/smcv/vault.sqlite --root-key /var/lib/smcv-key/root.key --output-directory /var/backups/smcv --key-fd 3 --retain 7'
+LimitCORE=0
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateNetwork=true
+PrivateTmp=true
+RemoveIPC=true
+ProtectHome=true
+ProtectProc=invisible
+ProcSubset=pid
+ProtectSystem=strict
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictAddressFamilies=AF_UNIX
+RestrictNamespaces=true
+RestrictSUIDSGID=true
+SystemCallArchitectures=native
+CapabilityBoundingSet=

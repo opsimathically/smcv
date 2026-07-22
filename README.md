@@ -6,9 +6,9 @@ encrypted secrets and gives applications narrowly scoped, revocable API
 access to only the secrets and operations they require.
 
 The project is under active implementation. The encrypted vault core,
-authenticated `/api/v1` surface, portable backup/recovery tooling, and owner
-web interface are complete. Operational packaging and release-candidate
-hardening remain, so it is not production-ready.
+authenticated `/api/v1` surface, portable backup/recovery tooling, owner web
+interface, and Linux operational packaging are complete. Final integrated
+release-candidate assurance remains, so it is not production-ready.
 
 ## Committed product direction
 
@@ -32,6 +32,10 @@ hardening remain, so it is not production-ready.
 - [Design guidelines](ai_design_guidelines/README.md)
 - [Implementation phases](ai_phased_plans/README.md)
 - [Human task workflow](human_tasks/README.md)
+- [Linux deployment guide](docs/operations/DEPLOYMENT.md)
+- [Backup operations](docs/operations/BACKUP_AND_RECOVERY_OPERATIONS.md)
+- [Upgrade and rollback](docs/operations/UPGRADE_AND_ROLLBACK.md)
+- [Incident runbooks](docs/operations/INCIDENT_RUNBOOKS.md)
 
 ## Current status
 
@@ -40,10 +44,11 @@ baseline](ai_phase_evidence/PHASE_0_EXIT_REPORT.md), [Phase 1 encrypted vault
 core](ai_phase_evidence/PHASE_1_EXIT_REPORT.md), [Phase 2 authenticated
 API](ai_phase_evidence/PHASE_2_EXIT_REPORT.md), [Phase 3 portable backup and
 recovery](ai_phase_evidence/PHASE_3_EXIT_REPORT.md), and [Phase 4 web product
-and accessibility](ai_phase_evidence/PHASE_4_EXIT_REPORT.md) passed their
-adversarial evidence gates on 2026-07-21. [Phase 5 operations and
-hardening](ai_phased_plans/PHASE_05_OPERATIONS.md) is active. Run the complete
-local verification gate with:
+and accessibility](ai_phase_evidence/PHASE_4_EXIT_REPORT.md), and [Phase 5
+operational hardening](ai_phase_evidence/PHASE_5_EXIT_REPORT.md) passed their
+adversarial evidence gates on 2026-07-21. [Phase 6 release
+readiness](ai_phased_plans/PHASE_06_RELEASE_READINESS.md) is active. Run the
+complete local verification gate with:
 
 ```sh
 ./scripts/check.sh

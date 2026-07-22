@@ -41,7 +41,7 @@ tokio = { version = "1.53.1", features = ["fs", "io-util", "macros", "net", "rt-
 tower-http = { version = "0.7.0", features = ["fs", "request-id", "timeout", "trace"] }
 tower = { version = "0.5.3", features = ["limit", "util"] }
 tracing = "0.1.44"
-tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt"] }
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
 unicode-normalization = "0.1.25"
 uuid = { version = "1.24.0", features = ["serde", "v4", "v7"] }
 webauthn-rs = { version = "=0.5.4", default-features = false }

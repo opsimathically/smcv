@@ -139,6 +139,13 @@ Expensive online backup and verification work shares a four-slot semaphore.
 Phase 5 calibrates production limits and proxy deployment rules. Saturation
 returns a safe rate-limit or timeout response.
 
+Operational metrics are not part of `/api/v1` and are never served by the
+product listener. When enabled, a separate loopback-only listener exposes a
+fixed vocabulary of aggregate counters without route, actor, source, object,
+vault, installation, or user-controlled labels. Production product binding is
+also loopback-only behind the documented TLS ingress; forwarding headers are
+cleared and never trusted.
+
 ## Browser security
 
 - Session cookies use the `__Host-` prefix, `Secure`, `HttpOnly`, `Path=/`, and

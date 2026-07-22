@@ -13,6 +13,7 @@ serde_json.workspace = true
 smcv-app = { version = "=0.1.0", path = "../smcv-app" }
 smcv-backup = { version = "=0.1.0", path = "../smcv-backup" }
 smcv-core = { version = "=0.1.0", path = "../smcv-core" }
+thiserror.workspace = true
 tokio.workspace = true
 tower-http.workspace = true
 tower.workspace = true

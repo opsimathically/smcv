@@ -1,6 +1,6 @@
 # Phase 5: operational hardening
 
-Status: **Active implementation phase**
+Status: **Passed 2026-07-21; Phase 6 active**
 
 ## Objective
 
@@ -88,3 +88,8 @@ OPS, OBS, supply-chain, upgrade, and incident requirements pass with no
 unresolved high finding and documented residual operational risks. A failed
 check stays inside the active goal as repair/retest work; no owner approval is
 required to proceed to Phase 6 after evidence passes.
+
+## Exit result
+
+Passed. See the [Phase 5 exit
+report](../ai_phase_evidence/PHASE_5_EXIT_REPORT.md), [operational campaign](../ai_phase_evidence/PHASE_5_OPERATIONS_REPORT.md), and [adversarial review](../ai_context_documentation/reviews/PHASE_5_ADVERSARIAL_REVIEW.md).

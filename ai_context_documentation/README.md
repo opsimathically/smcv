@@ -24,6 +24,9 @@ survive individual work sessions. Decision status is governed by
 - [Portable archive format version 1](PORTABLE_ARCHIVE_FORMAT_V1.md)
 - [Operations and security](OPERATIONS_AND_SECURITY.md)
 - [Security assurance](SECURITY_ASSURANCE.md)
+- [Operational procedures](../docs/operations/DEPLOYMENT.md)
+- [Incident runbooks](../docs/operations/INCIDENT_RUNBOOKS.md)
+- [Release construction](../docs/operations/RELEASES.md)
 
 ## Reviews and references
 

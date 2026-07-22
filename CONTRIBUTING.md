@@ -14,6 +14,14 @@ The check formats nothing and fails on formatting, lint, test, documentation,
 dependency advisory/license, local-link, or obvious secret-pattern failures.
 Use synthetic credentials and recovery material in every fixture.
 
+Phase 5 operational checks also run with:
+
+```sh
+./scripts/operations-smoke.sh
+./scripts/build-release.sh
+./scripts/verify-release.sh dist/smcv-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+```
+
 ## Architecture
 
 - `smcv-core` contains domain types and ports and has no HTTP or SQLite
@@ -25,4 +33,3 @@ Use synthetic credentials and recovery material in every fixture.
 
 Dependency direction points inward. An ingress or persistence adapter cannot
 bypass application authorization to decrypt protected values.
-

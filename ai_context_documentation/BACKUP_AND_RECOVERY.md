@@ -167,6 +167,14 @@ Downloading does not prove the owner retained an off-host copy; the UI records
 download status separately and removes the server artifact after configured
 download/expiry behavior.
 
+Phase 5 scheduled operation uses `smcv-cli backup-maintain` with a protected
+recovery-key descriptor. It creates and verifies the new archive first, never
+places that new archive in the deletion set, deletes only older files that
+fully authenticate under the supplied key, and fails the service invocation if
+any candidate is unverifiable. `backup-restore-drill` performs a real clean
+restore/reopen/integrity check under a restrictive temporary workspace and
+removes the destination before reporting success.
+
 ## Inspect and verify
 
 `inspect` without a key reports only public format and KDF information needed

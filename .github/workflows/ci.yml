@@ -23,6 +23,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit,cargo-deny
+          tool: cargo-audit,cargo-cyclonedx,cargo-deny
       - name: Verify workspace
         run: ./scripts/check.sh
+      - name: Verify operational workflows and release envelope
+        run: |
+          ./scripts/operations-smoke.sh
+          ./scripts/build-release.sh
+          ./scripts/verify-release.sh dist/smcv-0.1.0-x86_64-unknown-linux-gnu.tar.gz

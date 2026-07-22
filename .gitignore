@@ -1,4 +1,5 @@
 /target/
+/dist/
 /.env
 /runtime/
 *.sqlite
@@ -9,4 +10,3 @@
 *.smcvault
 *.key
 *.pem
-

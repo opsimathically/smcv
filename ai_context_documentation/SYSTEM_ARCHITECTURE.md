@@ -1,6 +1,6 @@
 # System architecture
 
-Status: **Committed architecture; Phases 0–4 implemented**
+Status: **Committed architecture; Phases 0–5 implemented**
 Last reviewed: 2026-07-21
 
 ## Architecture summary
@@ -100,6 +100,10 @@ bounded input types, but not convenience access that bypasses authorization.
   binary. It loads no third-party runtime asset, uses no service worker or
   browser persistence, and treats `/api/v1` as the sole product authority
   boundary.
+- Parses one closed production environment schema, validates Linux custody and
+  loopback-only ingress before opening listeners, emits allowlisted structured
+  events, and optionally exposes fixed-label metrics on a separate loopback
+  listener.
 
 ### SMCV CLI
 
@@ -108,6 +112,8 @@ bounded input types, but not convenience access that bypasses authorization.
 - Can mint a ten-minute, single-use loopback browser recovery adapter without
   adding a bootstrap route to the ordinary server.
 - Performs explicit maintenance and key operations.
+- Creates verify-before-delete scheduled backups, applies bounded retention,
+  and exercises archives through automatically cleaned isolated restore drills.
 - Prompts for secrets using protected terminal input; secret inputs are not
   accepted in command arguments.
 
