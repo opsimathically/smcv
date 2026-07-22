@@ -9,7 +9,9 @@ publish.workspace = true
 clap.workspace = true
 rpassword.workspace = true
 smcv-app = { version = "=0.1.0", path = "../smcv-app" }
+smcv-backup = { version = "=0.1.0", path = "../smcv-backup" }
 smcv-core = { version = "=0.1.0", path = "../smcv-core" }
+zeroize.workspace = true
 
 [lints]
 workspace = true

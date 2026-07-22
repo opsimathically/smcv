@@ -197,6 +197,87 @@ impl InitializedVault {
         Ok(principal_id)
     }
 
+    /// Adds a destination password authenticator through explicit local
+    /// recovery authority when a restored owner has no active password.
+    ///
+    /// This is not a network first-claim route. The capability is constructible
+    /// only by the local administrative adapter.
+    ///
+    /// # Errors
+    ///
+    /// Returns rejected when the owner is absent/invalid or already has an
+    /// active password, and returns a safe error for invalid protected input or
+    /// unavailable persistence.
+    pub fn recover_local_owner(
+        &self,
+        _capability: LocalSetupCapability,
+        password: &ProtectedString,
+        request_id: RequestId,
+        now_unix_ms: i64,
+    ) -> Result<PrincipalId, AuthenticationError> {
+        validate_password(password)?;
+        let owner = self
+            .store
+            .owner_principal()
+            .map_err(map_storage)?
+            .ok_or(AuthenticationError::Rejected)?;
+        verify_principal_commitment(self, &owner)?;
+        if owner.state != "active"
+            || !self
+                .store
+                .owner_authenticators(AuthenticatorKind::Password)
+                .map_err(map_storage)?
+                .is_empty()
+        {
+            return Err(AuthenticationError::Rejected);
+        }
+        let password_phc = hash_password(password)?;
+        let authenticator_id = AuthenticatorId::random();
+        let commitment = authenticator_commitment(
+            self,
+            authenticator_id,
+            owner.principal_id,
+            AuthenticatorKind::Password,
+            None,
+            None,
+            Some(&password_phc),
+            "active",
+            now_unix_ms,
+            None,
+            None,
+        )?;
+        let audit = self
+            .build_audit(
+                "owner:recover",
+                "principal",
+                Some(ObjectId::from_uuid(owner.principal_id.as_uuid())),
+                VaultOperationContext {
+                    request_id,
+                    actor_principal_id: None,
+                    credential_kind: None,
+                    credential_id: None,
+                    now_unix_ms,
+                },
+            )
+            .map_err(|_| AuthenticationError::Unavailable)?;
+        self.store
+            .add_owner_authenticator(
+                owner.principal_id,
+                &OwnerAuthenticatorInsert {
+                    authenticator_id,
+                    kind: AuthenticatorKind::Password,
+                    credential_lookup: None,
+                    credential_data: None,
+                    password_phc: Some(&password_phc),
+                    state_commitment: commitment,
+                },
+                now_unix_ms,
+                &audit,
+            )
+            .map_err(map_storage)?;
+        Ok(owner.principal_id)
+    }
+
     /// Verifies the owner password and creates a rotated server-side session.
     ///
     /// # Errors

@@ -1,6 +1,6 @@
 # Backup and recovery
 
-Status: **Committed product capability; proposed archive framing**
+Status: **Delivered non-web core; Phase 4 browser workflows active**
 Last reviewed: 2026-07-21
 
 ## Recovery promise
@@ -83,7 +83,7 @@ running. The workflow warns the operator to decommission the old installation.
 Migration and uncertain-compromise runbooks rotate or revoke credentials so
 two installations do not remain equally authoritative.
 
-## Proposed archive structure
+## Committed archive structure
 
 ```text
 fixed magic + format version
@@ -103,6 +103,10 @@ types and counts, compatibility requirements, and stream digest. Each chunk
 authenticates archive ID, monotonically increasing sequence, record framing,
 and final status. The final commitment prevents accepting a valid prefix as a
 complete archive.
+
+The exact version 1 byte layout, logical record registry, bounds, and
+compatibility behavior are specified in
+[Portable archive format version 1](PORTABLE_ARCHIVE_FORMAT_V1.md).
 
 Compression is disabled initially. If later introduced, it occurs before
 encryption and enforces strict decompressed-size and ratio limits.

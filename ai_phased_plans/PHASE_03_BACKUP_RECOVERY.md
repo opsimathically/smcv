@@ -1,6 +1,6 @@
 # Phase 3: portable backup and recovery
 
-Status: **Active implementation phase**
+Status: **Passed 2026-07-21; Phase 4 active**
 
 ## Objective
 

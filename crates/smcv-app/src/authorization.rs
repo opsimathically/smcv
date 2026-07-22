@@ -866,7 +866,9 @@ impl InitializedVault {
         Ok(())
     }
 
-    fn verified_authorization_snapshot(&self) -> Result<AuthorizationSnapshot, AuthorizationError> {
+    pub(crate) fn verified_authorization_snapshot(
+        &self,
+    ) -> Result<AuthorizationSnapshot, AuthorizationError> {
         let snapshot = self
             .store
             .authorization_snapshot()
@@ -977,7 +979,7 @@ fn operation(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn policy_commitment(
+pub(crate) fn policy_commitment(
     vault: &InitializedVault,
     policy_id: PolicyId,
     revision: u64,
@@ -1093,6 +1095,59 @@ fn graph_commitment(
     }
     if let Some(extra) = extra {
         items.push(extra);
+    }
+    if items.is_empty() && revision == 1 {
+        return commit(vault, b"authorization-graph\0v1\0revision\0\x31\0empty");
+    }
+    items.sort();
+    let mut digest = Sha256::new();
+    for item in items {
+        digest.update(
+            u32::try_from(item.len())
+                .map_err(|_| AuthorizationError::Unavailable)?
+                .to_be_bytes(),
+        );
+        digest.update(item);
+    }
+    let canonical = format!(
+        "authorization-graph\0v1\0revision\0{revision}\0{}",
+        hex::encode(digest.finalize())
+    );
+    commit(vault, canonical.as_bytes())
+}
+
+pub(crate) fn portable_authorization_commitment(
+    vault: &InitializedVault,
+    policies: &[smcv_storage::PortablePolicy],
+    grants: &[PolicyGrantRecord],
+    bindings: &[PolicyBindingRecord],
+    revision: u64,
+) -> Result<[u8; 32], AuthorizationError> {
+    let mut items = Vec::with_capacity(
+        policies
+            .len()
+            .saturating_add(grants.len())
+            .saturating_add(bindings.len()),
+    );
+    for policy in policies {
+        items.push(graph_item(
+            b'P',
+            policy.policy_id.as_bytes(),
+            &policy.state_commitment,
+        ));
+    }
+    for grant in grants {
+        items.push(graph_item(
+            b'G',
+            grant.grant_id.as_bytes(),
+            &grant.state_commitment,
+        ));
+    }
+    for binding in bindings {
+        let mut key = Vec::with_capacity(32);
+        key.extend_from_slice(binding.principal_id.as_bytes());
+        key.extend_from_slice(binding.policy_id.as_bytes());
+        items.push(graph_item(b'B', &key, &binding.state_commitment));
     }
     if items.is_empty() && revision == 1 {
         return commit(vault, b"authorization-graph\0v1\0revision\0\x31\0empty");

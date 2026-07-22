@@ -1,12 +1,12 @@
 # SMCV implementation phases
 
-Status: **Phase 3 active; Phases 0–2 passed**
+Status: **Phase 4 active; Phases 0–3 passed**
 Last reviewed: 2026-07-21
 
 ## Active phase
 
-The active phase is [Phase 3: portable backup and recovery](PHASE_03_BACKUP_RECOVERY.md).
-[Phase 2](PHASE_02_IDENTITY_AUTHZ_API.md) passed its evidence gate on 2026-07-21.
+The active phase is [Phase 4: web product and accessibility](PHASE_04_WEB_UI.md).
+[Phase 3](PHASE_03_BACKUP_RECOVERY.md) passed its evidence gate on 2026-07-21.
 Requirement ownership is tracked in the
 [requirements traceability matrix](REQUIREMENTS_TRACEABILITY.md).
 

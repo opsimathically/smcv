@@ -1,6 +1,6 @@
 # Phase 4: web product and accessibility
 
-Status: **Planned**
+Status: **Active implementation phase**
 
 ## Objective
 

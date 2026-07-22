@@ -542,7 +542,7 @@ fn map_authorization(error: AuthorizationError) -> AuthenticationError {
     clippy::too_many_arguments,
     reason = "the commitment authenticates each persisted credential field explicitly"
 )]
-fn application_credential_commitment(
+pub(crate) fn application_credential_commitment(
     vault: &InitializedVault,
     credential_id: CredentialId,
     principal_id: PrincipalId,

@@ -1,5 +1,6 @@
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::panic))]
+#![recursion_limit = "256"]
 
 use std::{
     collections::HashMap,
@@ -37,6 +38,8 @@ use tower_http::{
 };
 use uuid::Uuid;
 use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
+
+mod backup_jobs;
 
 const SESSION_COOKIE: &str = "__Host-smcv_session";
 const REQUEST_BODY_LIMIT: usize = 1024 * 1024;
@@ -100,6 +103,7 @@ pub struct ApiState {
     password_slots: Arc<Semaphore>,
     login_rate_limiter: Arc<LoginRateLimiter>,
     bearer_rate_limiter: Arc<LoginRateLimiter>,
+    backup_jobs: Arc<backup_jobs::BackupJobRegistry>,
 }
 
 impl ApiState {
@@ -118,12 +122,19 @@ impl ApiState {
         let vault = initialize_vault(database_path, root_key_path, now_unix_ms())
             .map_err(|error| error.to_string())?;
         let passkeys = PasskeyService::new(rp_id, origin).map_err(|error| error.to_string())?;
+        let backup_directory = database_path
+            .parent()
+            .ok_or_else(|| "backup artifact directory is invalid".to_owned())?
+            .join("backup-artifacts");
+        let backup_jobs = backup_jobs::BackupJobRegistry::open(&backup_directory)
+            .map_err(|error| error.to_string())?;
         Ok(Self {
             vault: Arc::new(vault),
             passkeys: Arc::new(passkeys),
             password_slots: Arc::new(Semaphore::new(4)),
             login_rate_limiter: Arc::new(LoginRateLimiter::default()),
             bearer_rate_limiter: Arc::new(LoginRateLimiter::default()),
+            backup_jobs: Arc::new(backup_jobs),
         })
     }
 
@@ -135,6 +146,10 @@ impl ApiState {
 }
 
 /// Builds the bounded same-origin `/api/v1` router.
+#[allow(
+    clippy::too_many_lines,
+    reason = "the closed versioned route catalog remains explicit in one composition root"
+)]
 pub fn router(state: ApiState) -> Router {
     let request_id_header = axum::http::HeaderName::from_static("x-request-id");
     Router::new()
@@ -203,6 +218,15 @@ pub fn router(state: ApiState) -> Router {
         .route("/api/v1/policies/{id}/grants", post(add_grant))
         .route("/api/v1/policies/{id}/bindings", post(bind_policy))
         .route("/api/v1/audit-events", get(audit_events))
+        .route("/api/v1/backups", post(backup_jobs::create_backup))
+        .route(
+            "/api/v1/backups/{id}",
+            get(backup_jobs::backup_status).delete(backup_jobs::delete_backup),
+        )
+        .route(
+            "/api/v1/backups/{id}/download",
+            get(backup_jobs::download_backup),
+        )
         .route("/api/v1/openapi.json", get(openapi))
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT))
@@ -1583,6 +1607,9 @@ fn openapi_document() -> serde_json::Value {
             "/policies/{id}/grants": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "addPolicyGrant", "summary": "Add closed allow-only grant", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"201": {"$ref": "#/components/responses/Id"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/policies/{id}/bindings": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "bindPolicy", "summary": "Bind policy to service identity", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"204": {"description": "Policy bound"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/audit-events": {"get": {"operationId": "auditEvents", "summary": "Read bounded audit page", "parameters": [{"$ref": "#/components/parameters/AuditAfter"}, {"$ref": "#/components/parameters/AuditLimit"}], "responses": {"200": {"description": "Authenticated audit records"}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/backups": {"post": {"operationId": "createBackupJob", "summary": "Start a durable portable-backup job", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BackupCreate"}}}}, "responses": {"202": {"description": "Opaque job and optional display-once recovery key"}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/backups/{id}": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "backupJobStatus", "summary": "Read safe durable backup status", "responses": {"200": {"description": "Safe job status without key material"}, "default": {"$ref": "#/components/responses/Error"}}}, "delete": {"operationId": "deleteBackupArtifact", "summary": "Delete an encrypted server artifact and status", "responses": {"204": {"description": "Artifact removed"}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/backups/{id}/download": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "downloadBackupArtifact", "summary": "Download a verified encrypted archive", "responses": {"200": {"description": "Portable .smcvault stream", "content": {"application/octet-stream": {}}}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/openapi.json": {"get": {"operationId": "openApiDocument", "summary": "Read this API contract", "security": [], "responses": {"200": {"description": "OpenAPI 3.1 document"}}}}
         },
         "components": {
@@ -1606,6 +1633,7 @@ fn openapi_document() -> serde_json::Value {
             },
             "schemas": {
                 "PasswordLogin": {"type": "object", "additionalProperties": false, "required": ["password"], "properties": {"password": {"type": "string", "minLength": 12, "maxLength": 1024, "writeOnly": true}}},
+                "BackupCreate": {"type": "object", "additionalProperties": false, "required": ["key_mode"], "properties": {"key_mode": {"type": "string", "enum": ["generated_recovery", "passphrase"]}, "passphrase": {"type": "string", "minLength": 16, "maxLength": 1024, "writeOnly": true}}},
                 "Error": {"type": "object", "additionalProperties": false, "required": ["code", "message", "request_id"], "properties": {"code": {"type": "string"}, "message": {"type": "string"}, "request_id": {"type": "string", "format": "uuid"}}, "example": {"code": "resource_unavailable", "message": "The requested resource is unavailable.", "request_id": "00000000-0000-4000-8000-000000000001"}},
                 "Id": {"type": "object", "additionalProperties": false, "required": ["id"], "properties": {"id": {"type": "string", "format": "uuid"}}},
                 "SecretValue": {"type": "object", "additionalProperties": false, "required": ["value_base64"], "properties": {"value_base64": {"type": "string", "contentEncoding": "base64", "readOnly": true}}, "example": {"value_base64": "c3ludGhldGlj"}},
@@ -1893,11 +1921,11 @@ pub fn enroll_local_owner(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::collections::BTreeMap;
+    use std::{collections::BTreeMap, fs};
 
     use axum::{
         body::{Body, to_bytes},
-        http::Request,
+        http::{Request, StatusCode},
     };
     use smcv_app::{MetadataInput, RequestPrincipal};
     use smcv_core::{ProtectedBytes, ProtectedString, RequestId, SecretSchedule};
@@ -2154,6 +2182,9 @@ mod tests {
             ("/policies/{id}/grants", &["post"][..]),
             ("/policies/{id}/bindings", &["post"][..]),
             ("/audit-events", &["get"][..]),
+            ("/backups", &["post"][..]),
+            ("/backups/{id}", &["delete", "get"][..]),
+            ("/backups/{id}/download", &["get"][..]),
             ("/openapi.json", &["get"][..]),
         ]);
         let paths = document["paths"]
@@ -2176,6 +2207,125 @@ mod tests {
                 assert!(operation_ids.insert(operation_id));
             }
         }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the durable-job test covers creation, polling, key non-persistence, and download"
+    )]
+    async fn backup_job_survives_request_and_downloads_only_after_verification() {
+        let (root, state) = state();
+        enroll_local_owner(
+            &state,
+            ProtectedString::new(String::from("synthetic long password")),
+        )
+        .unwrap_or_else(|error| panic!("synthetic owner must enroll: {error}"));
+        let login = Request::builder()
+            .method("POST")
+            .uri("/api/v1/session/password")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password":"synthetic long password"}"#))
+            .unwrap_or_else(|error| panic!("login request must build: {error}"));
+        let login = router(state.clone())
+            .oneshot(login)
+            .await
+            .unwrap_or_else(|error| panic!("login must respond: {error}"));
+        let cookie = login
+            .headers()
+            .get("set-cookie")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map_or_else(|| panic!("session cookie must exist"), str::to_owned);
+        let login_body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(login.into_body(), 16 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("login body must read: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("login body must parse: {error}"));
+        let csrf = login_body["csrf_token"]
+            .as_str()
+            .unwrap_or_else(|| panic!("CSRF token must exist"));
+        let create = Request::builder()
+            .method("POST")
+            .uri("/api/v1/backups")
+            .header("content-type", "application/json")
+            .header("cookie", &cookie)
+            .header("x-smcv-csrf", csrf)
+            .body(Body::from(r#"{"key_mode":"generated_recovery"}"#))
+            .unwrap_or_else(|error| panic!("backup request must build: {error}"));
+        let create = router(state.clone())
+            .oneshot(create)
+            .await
+            .unwrap_or_else(|error| panic!("backup create must respond: {error}"));
+        assert_eq!(create.status(), StatusCode::ACCEPTED);
+        let create_body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(create.into_body(), 16 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("backup response must read: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("backup response must parse: {error}"));
+        let job_id = create_body["job_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("job id must exist"));
+        let recovery_key = create_body["recovery_key"]
+            .as_str()
+            .unwrap_or_else(|| panic!("display-once recovery key must exist"));
+
+        let mut completed = false;
+        for _attempt in 0..1_000 {
+            let status = Request::builder()
+                .uri(format!("/api/v1/backups/{job_id}"))
+                .header("cookie", &cookie)
+                .body(Body::empty())
+                .unwrap_or_else(|error| panic!("status request must build: {error}"));
+            let status = router(state.clone())
+                .oneshot(status)
+                .await
+                .unwrap_or_else(|error| panic!("status must respond: {error}"));
+            assert_eq!(status.status(), StatusCode::OK);
+            let value: serde_json::Value = serde_json::from_slice(
+                &to_bytes(status.into_body(), 16 * 1024)
+                    .await
+                    .unwrap_or_else(|error| panic!("status body must read: {error}")),
+            )
+            .unwrap_or_else(|error| panic!("status body must parse: {error}"));
+            assert!(value.get("recovery_key").is_none());
+            if value["state"] == "completed" {
+                completed = true;
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(completed);
+        let status_path = root
+            .path()
+            .join(format!("data/backup-artifacts/{job_id}.json"));
+        let status_text = fs::read_to_string(status_path)
+            .unwrap_or_else(|error| panic!("durable status must read: {error}"));
+        assert!(!status_text.contains(recovery_key));
+
+        let download = Request::builder()
+            .uri(format!("/api/v1/backups/{job_id}/download"))
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap_or_else(|error| panic!("download request must build: {error}"));
+        let download = router(state)
+            .oneshot(download)
+            .await
+            .unwrap_or_else(|error| panic!("download must respond: {error}"));
+        assert_eq!(download.status(), StatusCode::OK);
+        assert_eq!(
+            download
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("application/octet-stream")
+        );
+        let archive = to_bytes(download.into_body(), 1024 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("archive download must read: {error}"));
+        assert!(archive.starts_with(b"SMCVLT01"));
     }
 
     #[tokio::test]

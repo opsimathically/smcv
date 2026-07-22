@@ -202,6 +202,27 @@ impl SqliteStore {
         &self,
         bootstrap: &BootstrapRecord,
     ) -> StorageResult<InitializationDisposition> {
+        self.begin_initialization_kind(bootstrap, false)
+    }
+
+    /// Begins a clean-host restore and atomically installs a durable guard that
+    /// prevents generic startup from activating incomplete imported state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same safe failures as [`Self::begin_initialization`].
+    pub fn begin_restore_initialization(
+        &self,
+        bootstrap: &BootstrapRecord,
+    ) -> StorageResult<InitializationDisposition> {
+        self.begin_initialization_kind(bootstrap, true)
+    }
+
+    fn begin_initialization_kind(
+        &self,
+        bootstrap: &BootstrapRecord,
+        restore: bool,
+    ) -> StorageResult<InitializationDisposition> {
         validate_bootstrap(bootstrap)?;
         if let Some(existing) = self.installation()? {
             if existing.vault_id != bootstrap.vault_id
@@ -240,6 +261,14 @@ impl SqliteStore {
             &bootstrap.token_verifier_key,
         ] {
             insert_key(&transaction, key, bootstrap.initialized_at_unix_ms)?;
+        }
+        if restore {
+            transaction.execute_batch(
+                "CREATE TABLE smcv_restore_activation_guard (
+                     singleton INTEGER PRIMARY KEY CHECK (singleton = 1)
+                 ) STRICT;
+                 INSERT INTO smcv_restore_activation_guard(singleton) VALUES (1);",
+            )?;
         }
         transaction.commit()?;
         Ok(InitializationDisposition::Begun)
@@ -334,8 +363,40 @@ impl SqliteStore {
     /// Returns an error unless all required active key records exist and the
     /// installation is initializing (or already ready at the same version).
     pub fn activate_initialization(&self, kek_version: u32) -> StorageResult<()> {
+        self.activate_initialization_kind(kek_version, false)
+    }
+
+    /// Clears the durable restore guard and commits readiness in the same
+    /// transaction after the application has verified the imported vault.
+    ///
+    /// # Errors
+    ///
+    /// Returns a state conflict unless this is a guarded initializing restore
+    /// with all required active keys.
+    pub fn activate_restored_initialization(&self, kek_version: u32) -> StorageResult<()> {
+        self.activate_initialization_kind(kek_version, true)
+    }
+
+    fn activate_initialization_kind(&self, kek_version: u32, restore: bool) -> StorageResult<()> {
         let connection = self.lock()?;
         let transaction = connection.unchecked_transaction()?;
+        let guard_table: i64 = transaction.query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'smcv_restore_activation_guard'",
+            [],
+            |row| row.get(0),
+        )?;
+        let guard_rows = if guard_table == 1 {
+            transaction.query_row(
+                "SELECT count(*) FROM smcv_restore_activation_guard WHERE singleton = 1",
+                [],
+                |row| row.get::<_, i64>(0),
+            )?
+        } else {
+            0
+        };
+        if restore != (guard_rows == 1) {
+            return Err(StorageError::StateConflict);
+        }
         let state: Option<String> = transaction
             .query_row(
                 "SELECT activation_state FROM smcv_installation_state WHERE singleton = 1",
@@ -380,6 +441,12 @@ impl SqliteStore {
         )?;
         if changed != 1 {
             return Err(StorageError::StateConflict);
+        }
+        if restore {
+            transaction.execute(
+                "DELETE FROM smcv_restore_activation_guard WHERE singleton = 1",
+                [],
+            )?;
         }
         transaction.commit()?;
         Ok(())

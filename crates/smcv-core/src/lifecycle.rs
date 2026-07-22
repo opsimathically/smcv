@@ -2,7 +2,7 @@
 ///
 /// These timestamps describe the upstream credential; they do not claim that
 /// SMCV can rotate or revoke that credential in its source system.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct SecretSchedule {
     /// Time after which the stored upstream credential is expected to expire.
     pub expires_at_unix_ms: Option<i64>,

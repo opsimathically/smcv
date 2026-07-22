@@ -5,9 +5,10 @@ vault written in Rust. It gives people a polished web interface for managing
 encrypted secrets and gives applications narrowly scoped, revocable API
 access to only the secrets and operations they require.
 
-The project is under active implementation. The encrypted vault core and the
-authenticated `/api/v1` surface are complete; portable backup/recovery and the
-owner web interface remain under implementation, so it is not production-ready.
+The project is under active implementation. The encrypted vault core,
+authenticated `/api/v1` surface, and portable backup/recovery tooling are
+complete; the owner web interface remains under implementation, so it is not
+production-ready.
 
 ## Committed product direction
 
@@ -36,11 +37,12 @@ owner web interface remain under implementation, so it is not production-ready.
 
 The documentation foundation, [Phase 0 engineering
 baseline](ai_phase_evidence/PHASE_0_EXIT_REPORT.md), [Phase 1 encrypted vault
-core](ai_phase_evidence/PHASE_1_EXIT_REPORT.md), and [Phase 2 authenticated
-API](ai_phase_evidence/PHASE_2_EXIT_REPORT.md) passed their adversarial evidence
-gates on 2026-07-21. [Phase 3 portable backup and
-recovery](ai_phased_plans/PHASE_03_BACKUP_RECOVERY.md) is active. Run the
-complete local verification gate with:
+core](ai_phase_evidence/PHASE_1_EXIT_REPORT.md), [Phase 2 authenticated
+API](ai_phase_evidence/PHASE_2_EXIT_REPORT.md), and [Phase 3 portable backup and
+recovery](ai_phase_evidence/PHASE_3_EXIT_REPORT.md) passed their adversarial
+evidence gates on 2026-07-21. [Phase 4 web product and
+accessibility](ai_phased_plans/PHASE_04_WEB_UI.md) is active. Run the complete
+local verification gate with:
 
 ```sh
 ./scripts/check.sh

@@ -36,6 +36,14 @@ struct KeyRing {
     keys: BTreeMap<u32, KeyMaterial>,
 }
 
+/// Vault-scoped security keys carried only inside authenticated portable
+/// archive encryption. Source root keys and KEKs are intentionally absent.
+pub(crate) struct PortableVaultKeys {
+    pub(crate) blind_index: KeyMaterial,
+    pub(crate) audit: KeyMaterial,
+    pub(crate) token_verifier: KeyMaterial,
+}
+
 impl InitializedVault {
     pub(crate) fn with_active_kek<T>(
         &self,
@@ -280,6 +288,59 @@ pub fn initialize_vault(
     })
 }
 
+/// Creates a fresh, non-ready destination installation around imported
+/// vault-scoped keys. Logical rows must be imported and fully verified before
+/// the caller activates the installation.
+#[cfg(unix)]
+pub(crate) fn initialize_restore_staging(
+    database_path: &Path,
+    root_key_path: &Path,
+    vault_id: VaultId,
+    keys: PortableVaultKeys,
+    now_unix_ms: i64,
+) -> Result<InitializedVault, InitializationError> {
+    prepare_parent(database_path)?;
+    prepare_parent(root_key_path)?;
+    ensure_separate_parents(database_path, root_key_path)?;
+    if database_path.exists() || root_key_path.exists() {
+        return Err(StorageError::StateConflict.into());
+    }
+
+    let installation_id = InstallationId::random();
+    let root_key = create_root_key_file(root_key_path, vault_id, installation_id)?;
+    let kek = KeyMaterial::generate()?;
+    let store = SqliteStore::open(database_path)?;
+    let bootstrap = create_bootstrap_with_keys(
+        vault_id,
+        installation_id,
+        &root_key,
+        &kek,
+        &keys,
+        now_unix_ms,
+    )?;
+    let disposition = store.begin_restore_initialization(&bootstrap)?;
+    if disposition != smcv_storage::InitializationDisposition::Begun {
+        return Err(StorageError::StateConflict.into());
+    }
+
+    let mut key_encryption_keys = BTreeMap::new();
+    key_encryption_keys.insert(1, kek);
+    Ok(InitializedVault {
+        store,
+        vault_id,
+        installation_id,
+        root_key: RwLock::new(root_key),
+        key_ring: RwLock::new(KeyRing {
+            active_version: 1,
+            keys: key_encryption_keys,
+        }),
+        blind_index_key: keys.blind_index,
+        audit_key: keys.audit,
+        token_verifier_key: keys.token_verifier,
+        authorization_gate: RwLock::new(()),
+    })
+}
+
 fn validate_kek_registry_state(
     store: &SqliteStore,
     installation: &InstallationRecord,
@@ -378,17 +439,36 @@ fn create_bootstrap(
     now_unix_ms: i64,
 ) -> Result<BootstrapRecord, InitializationError> {
     let kek = KeyMaterial::generate()?;
-    let blind = KeyMaterial::generate()?;
-    let audit = KeyMaterial::generate()?;
-    let token = KeyMaterial::generate()?;
+    let keys = PortableVaultKeys {
+        blind_index: KeyMaterial::generate()?,
+        audit: KeyMaterial::generate()?,
+        token_verifier: KeyMaterial::generate()?,
+    };
+    create_bootstrap_with_keys(
+        vault_id,
+        installation_id,
+        root_key,
+        &kek,
+        &keys,
+        now_unix_ms,
+    )
+}
 
+fn create_bootstrap_with_keys(
+    vault_id: VaultId,
+    installation_id: InstallationId,
+    root_key: &KeyMaterial,
+    kek: &KeyMaterial,
+    keys: &PortableVaultKeys,
+    now_unix_ms: i64,
+) -> Result<BootstrapRecord, InitializationError> {
     Ok(BootstrapRecord {
         vault_id,
         installation_id,
         initialized_at_unix_ms: now_unix_ms,
         key_encryption_key: wrap_key(
             root_key,
-            &kek,
+            kek,
             vault_id,
             installation_id,
             KeyKind::KeyEncryption,
@@ -396,8 +476,8 @@ fn create_bootstrap(
             None,
         )?,
         blind_index_key: wrap_key(
-            &kek,
-            &blind,
+            kek,
+            &keys.blind_index,
             vault_id,
             installation_id,
             KeyKind::BlindIndex,
@@ -405,8 +485,8 @@ fn create_bootstrap(
             Some(1),
         )?,
         audit_key: wrap_key(
-            &kek,
-            &audit,
+            kek,
+            &keys.audit,
             vault_id,
             installation_id,
             KeyKind::Audit,
@@ -414,8 +494,8 @@ fn create_bootstrap(
             Some(1),
         )?,
         token_verifier_key: wrap_key(
-            &kek,
-            &token,
+            kek,
+            &keys.token_verifier,
             vault_id,
             installation_id,
             KeyKind::TokenVerifier,

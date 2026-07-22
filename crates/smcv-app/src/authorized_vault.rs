@@ -484,6 +484,32 @@ impl AuthorizedVault<'_> {
             .map_err(Into::into)
     }
 
+    /// Confirms current owner authorization for creating a portable backup.
+    ///
+    /// # Errors
+    /// Returns a uniform authorization error when recent owner authority is
+    /// absent or changed before the decision point.
+    pub fn authorize_backup_create(&self) -> Result<(), AuthorizedVaultError> {
+        self.authorize(
+            Action::BackupCreate,
+            ResourceKind::Namespace,
+            ObjectId::from_uuid(self.vault.vault_id.as_uuid()),
+        )
+    }
+
+    /// Confirms current owner authorization for inspecting or downloading a
+    /// generated backup artifact.
+    ///
+    /// # Errors
+    /// Returns a uniform authorization error when owner authority is absent.
+    pub fn authorize_backup_inspect(&self) -> Result<(), AuthorizedVaultError> {
+        self.authorize(
+            Action::BackupInspect,
+            ResourceKind::Namespace,
+            ObjectId::from_uuid(self.vault.vault_id.as_uuid()),
+        )
+    }
+
     fn authorize_secret(
         &self,
         action: Action,

@@ -30,14 +30,13 @@ Last reviewed: 2026-07-21
 | D-105 | Use opaque random application credentials with a public lookup component and keyed verifier stored server-side. | Phase 2 proves display-once issuance, verifier-only persistence, independent expiry/revocation/last-use state, concurrent next-request revocation, and restart persistence. |
 | D-106 | Serve UI and API from one origin with server-side owner sessions in secure HTTP-only cookies and session-bound CSRF tokens. | Phase 2 enforces `__Host-`, Secure, HttpOnly, SameSite=Strict, CSRF on state changes, idle/absolute expiry, recent authentication, and logout revocation. |
 | D-107 | SQLite uses WAL, `synchronous=FULL`, foreign keys, bounded busy handling, trusted schema off, transactional checksummed migrations, and the online backup API. | Phase 0 recovery, rollback, configuration, checksum-drift, and snapshot tests validated the durability baseline. |
+| D-108 | `.smcvault` v1 uses a bounded public header, a random wrapped archive DEK, ordered XChaCha20-Poly1305 frames, and an authenticated final logical-stream commitment. | Phase 3 parser properties and wrong-key, corruption, prefix, extension, duplicate, reorder, and downgrade tests fail closed; the byte format is published. |
+| D-109 | Preserve imported application credential verifiers and their portable vault-scoped verifier key by default for disaster recovery; offer explicit revocation for migration. | Phase 3 clean-host tests prove preserved credentials authenticate and revoke mode invalidates them before activation without exporting raw tokens. |
+| D-110 | Preserve logical vault identity across disaster recovery while generating a new installation ID and incremented recovery epoch. | Phase 3 restore re-encrypts destination-bound envelopes, begins a new audit segment, and exposes the clone/decommission warning. |
 
 ## Proposed: validate in Phase 0 or named phase
 
-| ID | Proposal | Validation gate |
-|---|---|---|
-| D-108 | Use chunked authenticated encryption for `.smcvault` payloads with a small authenticated public header. | Phase 3 format review and adversarial parser tests. |
-| D-109 | Preserve imported application credential verifiers and their portable vault-scoped verifier key by default for disaster recovery; offer explicit revocation for migration. | Phase 3 UX and threat review. |
-| D-110 | Preserve logical vault identity across disaster recovery while generating a new installation ID and recovery epoch. | Phase 3 clone, audit, and restore review. |
+No implementation decisions are currently awaiting validation.
 
 ## Deferred
 

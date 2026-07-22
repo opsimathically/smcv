@@ -11,6 +11,7 @@ pub use smcv_core::SecretSchedule;
 mod authentication;
 mod authorization;
 mod authorized_vault;
+mod backup;
 mod initialization;
 mod passkeys;
 mod rotation;
@@ -24,6 +25,7 @@ pub use authorization::{
     AuthorizationError, EffectiveAccessDelta, PolicyDetails, PolicyMetadata, RequestPrincipal,
 };
 pub use authorized_vault::{AuthorizedVault, AuthorizedVaultError, IdempotencyInput};
+pub use backup::{BackupError, BackupFileReport, CredentialRestoreMode, RestoreReport};
 pub use initialization::{InitializationError, InitializedVault, initialize_vault};
 pub use passkeys::{PasskeyChallenge, PasskeyService};
 pub use rotation::{RootRotationOutcome, RotationProgress};

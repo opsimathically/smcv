@@ -1080,7 +1080,7 @@ impl InitializedVault {
             .map_err(map_storage)
     }
 
-    fn namespace_state_commitment(
+    pub(crate) fn namespace_state_commitment(
         &self,
         namespace_id: NamespaceId,
         parent_namespace_id: Option<NamespaceId>,
@@ -1114,7 +1114,7 @@ impl InitializedVault {
         clippy::too_many_arguments,
         reason = "explicit canonical state fields avoid an ambiguous or partially committed input"
     )]
-    fn secret_state_commitment(
+    pub(crate) fn secret_state_commitment(
         &self,
         secret_id: SecretId,
         namespace_id: NamespaceId,

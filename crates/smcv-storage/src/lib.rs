@@ -19,6 +19,7 @@ use thiserror::Error;
 mod authorization;
 mod idempotency;
 mod identity;
+mod portable;
 mod records;
 mod rotation;
 mod vault;
@@ -32,6 +33,11 @@ pub use identity::{
     ApplicationCredentialInsert, ApplicationCredentialRecord, AuthenticatorKind,
     OwnerAuthenticatorInsert, OwnerAuthenticatorRecord, PrincipalKind, PrincipalRecord,
     ServiceIdentityInsert, ServiceIdentityRecord, SessionInsert, SessionRecord,
+};
+pub use portable::{
+    PortableApplicationCredential, PortableAuthenticator, PortableNamespace, PortablePolicy,
+    PortablePrincipal, PortableSecret, PortableSecretVersion, PortableServiceIdentity,
+    PortableSnapshot, PortableTombstone,
 };
 pub use records::{
     AuditHead, AuditRecord, EncryptedRecord, NamespaceInsert, NamespaceRecord, ScheduledSecret,

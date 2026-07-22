@@ -1,6 +1,6 @@
 # API design
 
-Status: **Committed Phase 2 API; backup/restore additions active in Phase 3**
+Status: **Committed Phase 2 API and Phase 3 backup jobs**
 Last reviewed: 2026-07-21
 
 ## General contract
@@ -34,13 +34,16 @@ conformance test commit these route families:
 | Policies and effective access | `/api/v1/policies`, `/api/v1/service-identities/{id}/effective-access` |
 | Audit events | `/api/v1/audit-events` |
 | Backup creation and safe metadata | `/api/v1/backups` |
-| Restore staging/status | `/api/v1/restores` |
+| Restore staging/status (Phase 4 local-channel work) | `/api/v1/restores` |
 | Session and recent authentication | `/api/v1/session` |
 
-Phase 2 also commits explicit archive/restore, namespace move-impact and
-confirmed-move, immutable historical value, passkey ceremony, credential
-revocation, and OpenAPI subresources. Phase 3 adds backup and restore routes
-only after their format and recovery authority pass the portable-recovery gate.
+Phase 2 also commits namespace move-impact and confirmed-move, immutable
+historical value, passkey ceremony, credential revocation, and OpenAPI
+subresources. Phase 3 adds owner-authorized backup create/status/download/delete
+routes after their format and job semantics pass the portable-recovery gate.
+Fresh-host restore remains a local CLI operation until Phase 4 introduces a
+CLI-authorized single-use loopback channel; there is no network first-claim
+route.
 
 High-risk operations use action-shaped subresources when ordinary CRUD would
 hide important semantics, such as reveal, revoke, verify, or restore.

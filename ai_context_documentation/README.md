@@ -21,6 +21,7 @@ survive individual work sessions. Decision status is governed by
 - [Identity and authorization model](AUTHORIZATION_MODEL.md)
 - [API design](API_DESIGN.md)
 - [Backup and recovery](BACKUP_AND_RECOVERY.md)
+- [Portable archive format version 1](PORTABLE_ARCHIVE_FORMAT_V1.md)
 - [Operations and security](OPERATIONS_AND_SECURITY.md)
 - [Security assurance](SECURITY_ASSURANCE.md)
 
