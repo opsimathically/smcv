@@ -36,6 +36,7 @@ survive individual work sessions. Decision status is governed by
 - [Operability, scope, and recovery review](reviews/OPERABILITY_SCOPE_RECOVERY_REVIEW.md)
 - [Review resolution log](reviews/REVIEW_RESOLUTION_LOG.md)
 - [Final internal assurance](reviews/FINAL_INTERNAL_ASSURANCE.md)
+- [Ten-pass adversarial review](reviews/TEN_PASS_ADVERSARIAL_REVIEW.md)
 - [Authoritative references](AUTHORITATIVE_REFERENCES.md)
 
 ## Update rules

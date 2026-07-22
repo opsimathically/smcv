@@ -20,9 +20,17 @@ if [ -n "$(git -C "$repository" status --porcelain --untracked-files=normal)" ];
 fi
 source_epoch=${SOURCE_DATE_EPOCH:-$(git -C "$repository" log -1 --format=%ct)}
 source_timestamp=$(date -u -d "@$source_epoch" '+%Y-%m-%dT%H:%M:%SZ')
+rustc_version=$(rustc --version)
+cargo_version=$(cargo --version)
+cyclonedx_version=$(cargo cyclonedx --version)
+cargo_lock_sha256=$(sha256sum "$repository/Cargo.lock" | awk '{print $1}')
 temporary=$(mktemp -d)
+archive_partial=
 cleanup() {
   rm -f -- "$repository"/crates/*/smcv-release.json
+  if [ -n "$archive_partial" ]; then
+    rm -f -- "$archive_partial"
+  fi
   rm -rf -- "$temporary"
 }
 trap cleanup EXIT HUP INT TERM
@@ -52,9 +60,13 @@ jq -n \
   --arg version "$version" \
   --arg target "$target" \
   --arg commit "$commit" \
+  --arg rustc_version "$rustc_version" \
+  --arg cargo_version "$cargo_version" \
+  --arg cyclonedx_version "$cyclonedx_version" \
+  --arg cargo_lock_sha256 "$cargo_lock_sha256" \
   --argjson source_date_epoch "$source_epoch" \
   --argjson working_tree_dirty "$working_tree_dirty" \
-  '{schema:$schema,version:$version,target:$target,commit:$commit,source_date_epoch:$source_date_epoch,builder:"local-cargo-locked",working_tree_dirty:$working_tree_dirty,external_signing:false}' \
+  '{schema:$schema,version:$version,target:$target,commit:$commit,source_date_epoch:$source_date_epoch,builder:"local-cargo-locked",rustc_version:$rustc_version,cargo_version:$cargo_version,cyclonedx_version:$cyclonedx_version,cargo_lock_sha256:$cargo_lock_sha256,working_tree_dirty:$working_tree_dirty,external_signing:false}' \
   > "$stage/PROVENANCE.json"
 
 (
@@ -67,11 +79,20 @@ jq -n \
 find "$stage" -exec touch -h -d "@$source_epoch" {} +
 mkdir -p "$repository/dist"
 archive="$repository/dist/$bundle.tar.gz"
-tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$source_epoch" -C "$temporary" -cf - "$bundle" | gzip -n > "$archive"
-sha256sum "$archive" > "$archive.sha256"
+archive_partial=$(mktemp "$repository/dist/.$bundle.tar.gz.XXXXXX")
+tar --sort=name --owner=0 --group=0 --numeric-owner --mtime="@$source_epoch" -C "$temporary" -cf - "$bundle" | gzip -n > "$archive_partial"
+chmod 0644 "$archive_partial"
+mv -f -- "$archive_partial" "$archive"
+archive_partial=
+(
+  cd "$(dirname -- "$archive")"
+  sha256sum "$(basename -- "$archive")" > "$(basename -- "$archive.sha256")"
+)
 
 if [ -n "${SMCV_TEST_SIGNING_KEY_FILE:-}" ]; then
   openssl dgst -sha256 -sign "$SMCV_TEST_SIGNING_KEY_FILE" -out "$archive.sig" "$archive"
+else
+  rm -f -- "$archive.sig"
 fi
 
 printf '%s\n' "$archive"

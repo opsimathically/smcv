@@ -14,11 +14,13 @@ time/serial fields to the source epoch, writes local provenance, hashes every
 internal file, and creates a sorted owner-normalized gzip tarball. Repeated
 builds from the same checkout and source epoch must have the same SHA-256.
 
-The local provenance records version, target, commit, source epoch, locked Cargo
-builder, and the fact that no external signing identity was used. It is useful
-evidence, not a third-party attestation. If `SMCV_TEST_SIGNING_KEY_FILE` names a
-locally controlled PEM private key, the builder emits an optional detached test
-signature without copying that key into the artifact.
+The local provenance records version, target, commit, source epoch, Rust/Cargo/
+CycloneDX tool versions, the bundled lockfile hash, locked Cargo builder, and
+the fact that no external signing identity was used. It is useful evidence,
+not a third-party attestation. If `SMCV_TEST_SIGNING_KEY_FILE` names a locally
+controlled PEM private key, the builder emits an optional detached test
+signature without copying that key into the artifact. A later unsigned build
+removes any stale detached signature.
 
 Verify with:
 
@@ -27,7 +29,11 @@ scripts/verify-release.sh dist/smcv-VERSION-TARGET.tar.gz
 scripts/verify-release.sh dist/smcv-VERSION-TARGET.tar.gz PUBLIC_KEY.pem
 ```
 
-Verification checks the outer checksum when present, rejects obvious unsafe tar
-members, checks every internal hash, validates provenance/SBOM structure, and
-runs the CLI version probe. An official publication identity and public release
-channel remain owner-controlled post-development work.
+Verification requires the adjacent outer checksum and validates a private copy
+so a concurrent path replacement cannot change the bytes between checks. When
+a public key is supplied, it authenticates that copy before archive parsing or
+extraction. The verifier accepts only one expected safe root, regular files and
+directories with portable names, complete one-to-one internal checksums, the
+locked provenance fields, and all seven SBOM structures. It deliberately does
+not execute a binary from the archive. An official publication identity and
+public release channel remain owner-controlled post-development work.

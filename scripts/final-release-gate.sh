@@ -13,6 +13,7 @@ trap cleanup EXIT HUP INT TERM
 }
 
 ./scripts/check.sh
+./scripts/release-verifier-smoke.sh
 if ! systemd_output=$(systemd-analyze verify packaging/systemd/*.service packaging/systemd/*.timer 2>&1); then
   unexpected=$(printf '%s\n' "$systemd_output" \
     | sed '\|^smcv.service: Command /usr/local/lib/smcv/smcv-server is not executable: No such file or directory$|d')

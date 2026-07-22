@@ -1,7 +1,7 @@
 # System architecture
 
-Status: **Committed architecture; Phases 0–5 implemented**
-Last reviewed: 2026-07-21
+Status: **Committed architecture; Phases 0–6 implemented**
+Last reviewed: 2026-07-22
 
 ## Architecture summary
 
@@ -162,7 +162,8 @@ The supported production topology is:
 
 - One server process under a dedicated unprivileged OS account.
 - SQLite, WAL, and key-provider material on local protected storage.
-- TLS in the server or a carefully configured same-host reverse proxy.
+- TLS at the supported carefully configured same-host reverse proxy; the v1
+  SMCV server itself does not terminate TLS and remains loopback-only.
 - No shared network filesystem and no multiple active servers against one DB.
 - Off-host encrypted backups and, optionally, an external append-only audit
   sink.

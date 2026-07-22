@@ -13,15 +13,15 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@master
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # pinned 2026-07-22
         with:
           toolchain: 1.94.0
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@v2
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
+      - uses: taiki-e/install-action@b4b80945859e8ef89a9732a0f46499a443b196fe # v2.62.59
         with:
           tool: cargo-audit,cargo-cyclonedx,cargo-deny
       - name: Verify workspace
@@ -29,5 +29,6 @@ jobs:
       - name: Verify operational workflows and release envelope
         run: |
           ./scripts/operations-smoke.sh
+          ./scripts/release-verifier-smoke.sh
           ./scripts/build-release.sh
           ./scripts/verify-release.sh dist/smcv-0.1.0-x86_64-unknown-linux-gnu.tar.gz

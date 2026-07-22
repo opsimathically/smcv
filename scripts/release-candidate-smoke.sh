@@ -18,9 +18,15 @@ available_port() {
   node -e 'const n=require("net");const s=n.createServer();s.listen(0,"127.0.0.1",()=>{process.stdout.write(String(s.address().port));s.close();});'
 }
 
+mkdir "$temporary/artifact"
+stable_archive="$temporary/artifact/$(basename -- "$archive")"
+cp -- "$archive" "$stable_archive"
+cp -- "$archive.sha256" "$stable_archive.sha256"
+archive="$stable_archive"
 "$repository/scripts/verify-release.sh" "$archive" >/dev/null
-tar -xzf "$archive" --no-same-owner -C "$temporary"
-bundle=$(find "$temporary" -mindepth 1 -maxdepth 1 -type d)
+mkdir "$temporary/extracted"
+tar -xzf "$archive" --no-same-owner -C "$temporary/extracted"
+bundle=$(find "$temporary/extracted" -mindepth 1 -maxdepth 1 -type d)
 cli="$bundle/bin/smcv-cli"
 server="$bundle/bin/smcv-server"
 source_data="$temporary/source/data"
