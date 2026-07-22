@@ -104,6 +104,10 @@ Security events are not cascaded away when principals or resources are deleted.
 Events also identify installation ID and recovery epoch. A restore closes the
 imported segment and begins a new destination segment referencing the archive;
 it does not pretend the two installations are one uninterrupted process.
+Within one running vault, audit-head observation, commitment construction, and
+the consuming append/mutation transaction are serialized as one application
+critical section. Concurrent reads may still perform non-audit work in
+parallel, but they cannot build competing events from the same chain head.
 
 ### Idempotency records
 
@@ -179,6 +183,10 @@ unobserved disk-exhaustion hazard.
   directory.
 - Long reads do not indefinitely prevent checkpoints.
 - Migrations have an application ID, schema version, checksums, and backup gate.
+- Open rejects a non-SMCV database before persistent pragmas or schema writes,
+  rejects unknown migration rows and inconsistent/newer `user_version`, and
+  permits only the exact frozen application-ID-less Phase 0 fixture as a
+  legacy identity transition.
 - Raw SQL access is confined to the persistence adapter.
 
 ## Import staging

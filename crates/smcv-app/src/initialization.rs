@@ -1,5 +1,10 @@
 use core::fmt;
-use std::{collections::BTreeMap, fs, path::Path, sync::RwLock};
+use std::{
+    collections::BTreeMap,
+    fs,
+    path::Path,
+    sync::{Mutex, RwLock},
+};
 
 #[cfg(unix)]
 use std::os::unix::{fs::DirBuilderExt, fs::PermissionsExt};
@@ -28,6 +33,7 @@ pub struct InitializedVault {
     blind_index_key: KeyMaterial,
     audit_key: KeyMaterial,
     token_verifier_key: KeyMaterial,
+    pub(crate) audit_gate: Mutex<()>,
     pub(crate) authorization_gate: RwLock<()>,
 }
 
@@ -284,6 +290,7 @@ pub fn initialize_vault(
         blind_index_key,
         audit_key,
         token_verifier_key,
+        audit_gate: Mutex::new(()),
         authorization_gate: RwLock::new(()),
     })
 }
@@ -337,6 +344,7 @@ pub(crate) fn initialize_restore_staging(
         blind_index_key: keys.blind_index,
         audit_key: keys.audit,
         token_verifier_key: keys.token_verifier,
+        audit_gate: Mutex::new(()),
         authorization_gate: RwLock::new(()),
     })
 }

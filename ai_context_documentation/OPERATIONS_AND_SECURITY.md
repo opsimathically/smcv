@@ -64,6 +64,10 @@ exists. Bootstrap values do not enter process lists or durable logs.
   ordinary checked-in configuration.
 - Startup prints effective safe configuration without protected values.
 - Production refuses non-loopback plaintext binding.
+- Database open checks the SMCV application ID and an exact checksummed
+  migration prefix before changing persistent SQLite configuration. A foreign,
+  future, gapped, or version-inconsistent database fails closed without being
+  adopted by the running binary.
 - Trusted forwarding-header mode is not supported in v1 and any configured
   proxy trust is rejected. The same-host ingress clears `Forwarded` and
   `X-Forwarded-*`; unauthenticated password, passkey, and unknown-bearer limits

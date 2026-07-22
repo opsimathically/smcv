@@ -126,7 +126,9 @@ impl SqliteStore {
     pub fn open(path: impl AsRef<Path>) -> StorageResult<Self> {
         let path = path.as_ref();
         prepare_database_file(path)?;
-        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX;
+        let flags = OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_FULL_MUTEX
+            | OpenFlags::SQLITE_OPEN_NOFOLLOW;
         let connection = Connection::open_with_flags(path, flags)?;
         configure(&connection)?;
 
@@ -178,7 +180,9 @@ impl SqliteStore {
         let source = self.lock()?;
         let mut target = Connection::open_with_flags(
             destination,
-            OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_FULL_MUTEX,
+            OpenFlags::SQLITE_OPEN_READ_WRITE
+                | OpenFlags::SQLITE_OPEN_FULL_MUTEX
+                | OpenFlags::SQLITE_OPEN_NOFOLLOW,
         )?;
         let backup = Backup::new(&source, &mut target)?;
         backup.run_to_completion(32, Duration::from_millis(10), None)?;
@@ -258,13 +262,13 @@ fn io_as_storage(error: std::io::Error) -> StorageError {
 fn configure(connection: &Connection) -> StorageResult<()> {
     connection.busy_timeout(BUSY_TIMEOUT)?;
     let _previous_limit = connection.set_limit(Limit::SQLITE_LIMIT_LENGTH, MAX_SQL_VALUE_BYTES);
+    validate_database_identity(connection)?;
     connection.pragma_update(None, "foreign_keys", true)?;
     connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "synchronous", "FULL")?;
     connection.pragma_update(None, "temp_store", "MEMORY")?;
     connection.pragma_update(None, "trusted_schema", false)?;
     connection.pragma_update(None, "secure_delete", true)?;
-    connection.pragma_update(None, "application_id", APPLICATION_ID)?;
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS smcv_schema_migrations (
              version INTEGER PRIMARY KEY,
@@ -274,6 +278,57 @@ fn configure(connection: &Connection) -> StorageResult<()> {
     )?;
     apply_migrations(connection)?;
     Ok(())
+}
+
+fn validate_database_identity(connection: &Connection) -> StorageResult<()> {
+    let application_id: i32 =
+        connection.pragma_query_value(None, "application_id", |row| row.get(0))?;
+    if application_id == APPLICATION_ID {
+        return Ok(());
+    }
+    if application_id != 0 {
+        return Err(StorageError::MigrationMismatch);
+    }
+    let existing_objects: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'",
+        [],
+        |row| row.get(0),
+    )?;
+    if existing_objects != 0 && !is_recognized_legacy_database(connection)? {
+        return Err(StorageError::MigrationMismatch);
+    }
+    connection.pragma_update(None, "application_id", APPLICATION_ID)?;
+    Ok(())
+}
+
+fn is_recognized_legacy_database(connection: &Connection) -> StorageResult<bool> {
+    let migration_table: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_schema WHERE type = 'table' AND name = 'smcv_schema_migrations'",
+        [],
+        |row| row.get(0),
+    )?;
+    let unexpected_objects: i64 = connection.query_row(
+        "SELECT count(*) FROM sqlite_schema
+          WHERE name NOT LIKE 'sqlite_%'
+            AND name NOT IN ('smcv_schema_migrations', 'smcv_installation_state')",
+        [],
+        |row| row.get(0),
+    )?;
+    if migration_table != 1 || unexpected_objects != 0 {
+        return Ok(false);
+    }
+    let mut statement = connection
+        .prepare("SELECT version, checksum FROM smcv_schema_migrations ORDER BY version")?;
+    let rows = statement.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    let mut applied = Vec::new();
+    for row in rows {
+        applied.push(row?);
+    }
+    Ok(applied.len() == 1
+        && applied[0].0 == MIGRATIONS[0].version
+        && applied[0].1 == MIGRATIONS[0].checksum)
 }
 
 struct Migration {
@@ -645,6 +700,33 @@ CREATE INDEX smcv_idempotency_expiry ON smcv_idempotency_records(expires_at_unix
 ];
 
 fn apply_migrations(connection: &Connection) -> StorageResult<()> {
+    let applied = {
+        let mut statement = connection
+            .prepare("SELECT version, checksum FROM smcv_schema_migrations ORDER BY version")?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+        })?;
+        let mut applied = Vec::new();
+        for row in rows {
+            applied.push(row?);
+        }
+        applied
+    };
+    if applied.len() > MIGRATIONS.len() {
+        return Err(StorageError::MigrationMismatch);
+    }
+    for ((version, checksum), expected) in applied.iter().zip(MIGRATIONS) {
+        if *version != expected.version || checksum != expected.checksum {
+            return Err(StorageError::MigrationMismatch);
+        }
+    }
+    let user_version: i64 =
+        connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let expected_user_version = applied.last().map_or(0, |(version, _)| *version);
+    if user_version != expected_user_version {
+        return Err(StorageError::MigrationMismatch);
+    }
+
     for migration in MIGRATIONS {
         if migration_checksum(migration.sql) != migration.checksum {
             return Err(StorageError::MigrationMismatch);
@@ -1015,6 +1097,74 @@ mod tests {
 
         assert!(matches!(
             SqliteStore::open(&database_path),
+            Err(StorageError::MigrationMismatch)
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unrelated_sqlite_database_is_rejected_without_mutation() {
+        let directory = TempDir::new()
+            .unwrap_or_else(|error| panic!("synthetic temp directory must open: {error}"));
+        let database_path = directory.path().join("unrelated.sqlite");
+        let connection = Connection::open(&database_path)
+            .unwrap_or_else(|error| panic!("unrelated database must create: {error}"));
+        connection
+            .execute("CREATE TABLE unrelated(value TEXT) STRICT", [])
+            .unwrap_or_else(|error| panic!("unrelated schema must create: {error}"));
+        drop(connection);
+        std::fs::set_permissions(&database_path, std::fs::Permissions::from_mode(0o600))
+            .unwrap_or_else(|error| panic!("unrelated database must restrict: {error}"));
+        let before = std::fs::read(&database_path)
+            .unwrap_or_else(|error| panic!("unrelated bytes must read: {error}"));
+
+        assert!(matches!(
+            SqliteStore::open(&database_path),
+            Err(StorageError::MigrationMismatch)
+        ));
+        let after = std::fs::read(&database_path)
+            .unwrap_or_else(|error| panic!("unrelated bytes must reread: {error}"));
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn unknown_or_inconsistent_schema_versions_fail_closed() {
+        let directory = TempDir::new()
+            .unwrap_or_else(|error| panic!("synthetic temp directory must open: {error}"));
+        let unknown_path = directory.path().join("unknown.sqlite");
+        let store = SqliteStore::open(&unknown_path)
+            .unwrap_or_else(|error| panic!("synthetic database must open: {error}"));
+        {
+            let connection = store
+                .lock()
+                .unwrap_or_else(|error| panic!("synthetic database must lock: {error}"));
+            connection
+                .execute(
+                    "INSERT INTO smcv_schema_migrations VALUES (99, 'future', 0)",
+                    [],
+                )
+                .unwrap_or_else(|error| panic!("future migration must insert: {error}"));
+            connection
+                .pragma_update(None, "user_version", 99)
+                .unwrap_or_else(|error| panic!("future version must set: {error}"));
+        }
+        drop(store);
+        assert!(matches!(
+            SqliteStore::open(&unknown_path),
+            Err(StorageError::MigrationMismatch)
+        ));
+
+        let inconsistent_path = directory.path().join("inconsistent.sqlite");
+        let store = SqliteStore::open(&inconsistent_path)
+            .unwrap_or_else(|error| panic!("synthetic database must open: {error}"));
+        store
+            .lock()
+            .unwrap_or_else(|error| panic!("synthetic database must lock: {error}"))
+            .pragma_update(None, "user_version", 99)
+            .unwrap_or_else(|error| panic!("inconsistent version must set: {error}"));
+        drop(store);
+        assert!(matches!(
+            SqliteStore::open(&inconsistent_path),
             Err(StorageError::MigrationMismatch)
         ));
     }

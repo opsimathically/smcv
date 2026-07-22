@@ -102,3 +102,22 @@ Validation includes offline hierarchy corruption, absent-resource denial
 attribution, revoked-credential denial attribution, service-context rollback,
 the complete application/server suites, strict all-feature Clippy, and the
 full repository gate. No Pass 4 critical/high finding remains open.
+
+## Pass 5 — persistence, migrations, concurrency, and crash consistency
+
+Perspective: an operator selecting the wrong database, an older binary opening
+future state, a local path replacer, concurrent audited requests, and a crash
+between durable state-machine steps. Result: **four findings repaired and
+retested**.
+
+| ID | Severity | Finding | Repair and verification |
+|---|---|---|---|
+| A10-R5-001 | Critical | Database configuration unconditionally set the SMCV application ID and enabled WAL before proving file identity. Pointing SMCV at another restrictive SQLite database could therefore persistently modify it and then add SMCV migration state. | Open now reads identity before every persistent pragma. A zero-ID database must be empty, except for the exact checksummed two-table Phase 0 legacy fixture; a different application ID or any unrelated object fails closed. A regression creates an unrelated database, attempts open, and proves its bytes are unchanged. |
+| A10-R5-002 | High | Migration startup verified only known rows encountered in its loop. It did not reject extra future migration rows or a `user_version` newer/inconsistent with recorded history, allowing an older binary to open unsupported state. | Startup now requires the applied rows to be an exact ordered prefix of compiled migrations and requires `user_version` to equal that prefix head before applying anything. Tests reject an added version 99 row and an independently inconsistent version while the frozen forward-migration fixture still passes. |
+| A10-R5-003 | High | Audit commitment construction read the chain head before the later append/mutation transaction, while concurrent request paths held only shared authorization guards. Two requests could build the same next sequence; one then failed spuriously at commit, including read requests whose authorization decision itself is audited. | Each initialized vault now holds a narrow audit mutex from head observation and HMAC construction through the consuming append or domain transaction. A deterministic two-thread regression holds the first pending event, proves the second builder cannot pass, commits the first, and observes the exact next sequence for the second. Domain mutation/audit atomicity remains inside SQLite. |
+| A10-R5-004 | Medium | SQLite database and online-snapshot connections reopened previously validated paths without requesting SQLite's no-follow protection, leaving a final-component symlink substitution window between metadata validation/creation and SQLite open. | Every database and snapshot connection now includes `SQLITE_OPEN_NOFOLLOW` in addition to the existing restrictive-file checks, full mutex mode, protected-parent policy, and non-overwrite snapshot behavior. |
+
+Validation includes the expanded storage suite, frozen migration fixture,
+foreign-database byte comparison, unknown/inconsistent-version rejection,
+deterministic audit concurrency ordering, strict all-feature Clippy, and the
+full repository gate. No Pass 5 critical/high finding remains open.

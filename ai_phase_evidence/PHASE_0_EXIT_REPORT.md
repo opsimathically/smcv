@@ -29,7 +29,7 @@ used. All fixtures are deterministic synthetic values or fresh temporary data.
 | Redacted protected types | Core/app/crypto tests prove protected bytes, strings, runtime paths, token plaintext, keys, verifiers, nonces, and ciphertext are absent from `Debug`. |
 | Dependency record | `PHASE_0_TECHNICAL_DECISIONS.md`, `Cargo.lock`, `deny.toml`, and current advisory scan record rationale, features, licenses, maintenance posture, and criticality. |
 | Crypto decision and independent vector | D-101/D-102 are committed. The XChaCha20-Poly1305 AAD/ciphertext fixture was reproduced using libsodium/PyNaCl; corruption, substitution, wrong-key token, and redaction tests pass. |
-| SQLite behavior | Tests observe foreign keys, WAL, FULL sync, application ID, committed-WAL reopen, uncommitted rollback, online snapshot readability/no-overwrite, and migration checksum drift fail-closed. |
+| SQLite behavior | Tests observe foreign keys, WAL, FULL sync, application ID, no-follow opens, committed-WAL reopen, uncommitted rollback, online snapshot readability/no-overwrite, migration checksum drift, unknown/newer version rejection, and byte-for-byte non-mutation of an unrelated SQLite database. |
 | Bounded archive prototype | Unit and property tests reject oversized file/header/KDF/chunk/count input before expensive work and never panic for arbitrary inputs up to 599 bytes. |
 | Secret sentinel absence | Repository scanner passed over source, manifests, Markdown, JSON, and YAML. |
 
@@ -87,7 +87,10 @@ tree. Representative server document SHA-256 in this run:
 - A committed WAL write survived close/reopen. A dropped transaction did not
   expose its uncommitted row. Online backup produced a readable, application-ID
   preserving snapshot and refused overwrite.
-- Changing an applied migration checksum prevented database open.
+- Changing an applied migration checksum, adding an unknown future migration,
+  or making `user_version` inconsistent prevented database open. A restrictive
+  unrelated SQLite file was rejected before journal/application-ID/schema
+  mutation and remained byte-for-byte unchanged.
 - Server startup safely failed on an occupied port and on a non-loopback
   plaintext address; neither case created persistent state.
 

@@ -1,4 +1,5 @@
 use core::fmt;
+use std::{ops::Deref, sync::MutexGuard};
 
 use smcv_core::{
     AuditEventId, NamespaceId, ObjectId, PrincipalId, ProtectedBytes, ProtectedString, RequestId,
@@ -152,6 +153,19 @@ pub struct AuditVerification {
     pub final_sequence: u64,
     /// Final verified commitment.
     pub final_commitment: [u8; 32],
+}
+
+pub(crate) struct PendingAudit<'a> {
+    record: AuditRecord<'static>,
+    _guard: MutexGuard<'a, ()>,
+}
+
+impl Deref for PendingAudit<'_> {
+    type Target = AuditRecord<'static>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.record
+    }
 }
 
 /// Capability produced only after owner authorization, recent authentication,
@@ -1309,7 +1323,7 @@ impl InitializedVault {
         target_kind: &'static str,
         target_id: Option<ObjectId>,
         operation: VaultOperationContext,
-    ) -> Result<AuditRecord<'static>, VaultError> {
+    ) -> Result<PendingAudit<'_>, VaultError> {
         self.build_audit_outcome(action, target_kind, target_id, "allowed", operation)
     }
 
@@ -1320,7 +1334,11 @@ impl InitializedVault {
         target_id: Option<ObjectId>,
         outcome: &'static str,
         operation: VaultOperationContext,
-    ) -> Result<AuditRecord<'static>, VaultError> {
+    ) -> Result<PendingAudit<'_>, VaultError> {
+        let guard = self
+            .audit_gate
+            .lock()
+            .map_err(|_| VaultError::Unavailable)?;
         let head = self.store.audit_head().map_err(map_storage)?;
         let sequence = head.sequence.checked_add(1).ok_or(VaultError::Conflict)?;
         let installation = self
@@ -1347,23 +1365,26 @@ impl InitializedVault {
             outcome,
         };
         let commitment = audit_commitment(self.audit_key(), &input).map_err(map_crypto)?;
-        Ok(AuditRecord {
-            commitment_version: 2,
-            sequence,
-            event_id,
-            installation_id: self.installation_id,
-            recovery_epoch: installation.recovery_epoch,
-            occurred_at_unix_ms: operation.now_unix_ms,
-            request_id: operation.request_id,
-            actor_principal_id: operation.actor_principal_id,
-            credential_kind: operation.credential_kind,
-            credential_id: operation.credential_id,
-            action,
-            target_kind,
-            target_id,
-            outcome,
-            previous_commitment: head.commitment,
-            commitment: *commitment.as_bytes(),
+        Ok(PendingAudit {
+            record: AuditRecord {
+                commitment_version: 2,
+                sequence,
+                event_id,
+                installation_id: self.installation_id,
+                recovery_epoch: installation.recovery_epoch,
+                occurred_at_unix_ms: operation.now_unix_ms,
+                request_id: operation.request_id,
+                actor_principal_id: operation.actor_principal_id,
+                credential_kind: operation.credential_kind,
+                credential_id: operation.credential_id,
+                action,
+                target_kind,
+                target_id,
+                outcome,
+                previous_commitment: head.commitment,
+                commitment: *commitment.as_bytes(),
+            },
+            _guard: guard,
         })
     }
 }
@@ -1596,7 +1617,12 @@ pub(crate) fn map_storage(error: StorageError) -> VaultError {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::fs;
+    use std::{
+        fs,
+        sync::{Arc, mpsc},
+        thread,
+        time::Duration,
+    };
 
     use proptest::prelude::*;
     use rusqlite::Connection;
@@ -1659,6 +1685,82 @@ mod tests {
             Some("u")
         );
         assert_eq!(decoded.tags[1].expose(), "yz");
+    }
+
+    #[test]
+    fn concurrent_audit_builders_serialize_through_commit() {
+        let directory =
+            TempDir::new().unwrap_or_else(|error| panic!("synthetic directory must open: {error}"));
+        let vault = Arc::new(
+            initialize_vault(
+                &directory.path().join("database/vault.sqlite"),
+                &directory.path().join("provider/root.key"),
+                1_800_000_000_000,
+            )
+            .unwrap_or_else(|error| panic!("synthetic vault must initialize: {error}")),
+        );
+        let (built_sender, built_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let first_vault = Arc::clone(&vault);
+        let first = thread::spawn(move || {
+            let audit = first_vault
+                .build_audit("test:first", "test", None, operation(1_800_000_000_001))
+                .unwrap_or_else(|error| panic!("first audit must build: {error}"));
+            let sequence = audit.sequence;
+            built_sender
+                .send(sequence)
+                .unwrap_or_else(|error| panic!("first sequence must send: {error}"));
+            release_receiver
+                .recv()
+                .unwrap_or_else(|error| panic!("first audit must release: {error}"));
+            first_vault
+                .store
+                .append_audit(&audit)
+                .unwrap_or_else(|error| panic!("first audit must commit: {error}"));
+            sequence
+        });
+        let first_sequence = built_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap_or_else(|error| panic!("first audit must build: {error}"));
+
+        let (second_sender, second_receiver) = mpsc::channel();
+        let second_vault = Arc::clone(&vault);
+        let second = thread::spawn(move || {
+            let audit = second_vault
+                .build_audit("test:second", "test", None, operation(1_800_000_000_002))
+                .unwrap_or_else(|error| panic!("second audit must build: {error}"));
+            let sequence = audit.sequence;
+            second_vault
+                .store
+                .append_audit(&audit)
+                .unwrap_or_else(|error| panic!("second audit must commit: {error}"));
+            second_sender
+                .send(sequence)
+                .unwrap_or_else(|error| panic!("second sequence must send: {error}"));
+        });
+        assert!(
+            second_receiver
+                .recv_timeout(Duration::from_millis(100))
+                .is_err()
+        );
+        release_sender
+            .send(())
+            .unwrap_or_else(|error| panic!("first audit release must send: {error}"));
+        assert_eq!(
+            first
+                .join()
+                .unwrap_or_else(|_| panic!("first audit must join")),
+            first_sequence
+        );
+        assert_eq!(
+            second_receiver
+                .recv_timeout(Duration::from_secs(2))
+                .unwrap_or_else(|error| panic!("second audit must commit: {error}")),
+            first_sequence + 1
+        );
+        second
+            .join()
+            .unwrap_or_else(|_| panic!("second audit must join"));
     }
 
     #[test]
