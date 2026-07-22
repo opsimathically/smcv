@@ -66,7 +66,9 @@ exists. Bootstrap values do not enter process lists or durable logs.
 - Production refuses non-loopback plaintext binding.
 - Trusted forwarding-header mode is not supported in v1 and any configured
   proxy trust is rejected. The same-host ingress clears `Forwarded` and
-  `X-Forwarded-*`; rate limits use the direct peer.
+  `X-Forwarded-*`; unauthenticated password, passkey, and unknown-bearer limits
+  use the direct peer. Valid application credentials use independent bounded
+  buckets keyed by their public random lookup component.
 
 ## TLS and network
 

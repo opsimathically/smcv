@@ -50,6 +50,7 @@ const REQUEST_BODY_LIMIT: usize = 1024 * 1024;
 const ARCHIVE_UPLOAD_BODY_LIMIT: usize = 8 * 1024 * 1024 * 1024;
 const LOGIN_WINDOW_MS: i64 = 60_000;
 const LOGIN_ATTEMPTS_PER_WINDOW: u16 = 10;
+const PASSKEY_ATTEMPTS_PER_WINDOW: u16 = 20;
 const BEARER_ATTEMPTS_PER_WINDOW: u16 = 120;
 const MAX_LOGIN_SOURCES: usize = 4_096;
 
@@ -59,13 +60,31 @@ struct LoginWindow {
     attempts: u16,
 }
 
+#[derive(Clone, Copy, Eq, Hash, PartialEq)]
+enum AuthenticationRateKey {
+    Peer(IpAddr),
+    ApplicationCredential([u8; 12]),
+}
+
+impl From<IpAddr> for AuthenticationRateKey {
+    fn from(value: IpAddr) -> Self {
+        Self::Peer(value)
+    }
+}
+
 #[derive(Default)]
 struct LoginRateLimiter {
-    sources: Mutex<HashMap<IpAddr, LoginWindow>>,
+    sources: Mutex<HashMap<AuthenticationRateKey, LoginWindow>>,
 }
 
 impl LoginRateLimiter {
-    fn allow(&self, source: IpAddr, now_unix_ms: i64, limit: u16) -> bool {
+    fn allow(
+        &self,
+        source: impl Into<AuthenticationRateKey>,
+        now_unix_ms: i64,
+        limit: u16,
+    ) -> bool {
+        let source = source.into();
         let Ok(mut sources) = self.sources.lock() else {
             return false;
         };
@@ -107,6 +126,7 @@ pub struct ApiState {
     passkeys: Arc<PasskeyService>,
     password_slots: Arc<Semaphore>,
     login_rate_limiter: Arc<LoginRateLimiter>,
+    passkey_rate_limiter: Arc<LoginRateLimiter>,
     bearer_rate_limiter: Arc<LoginRateLimiter>,
     backup_jobs: Arc<backup_jobs::BackupJobRegistry>,
     metrics: Arc<OperationalMetrics>,
@@ -151,6 +171,7 @@ impl ApiState {
             passkeys: Arc::new(passkeys),
             password_slots: Arc::new(Semaphore::new(4)),
             login_rate_limiter: Arc::new(LoginRateLimiter::default()),
+            passkey_rate_limiter: Arc::new(LoginRateLimiter::default()),
             bearer_rate_limiter: Arc::new(LoginRateLimiter::default()),
             backup_jobs: Arc::new(backup_jobs),
             metrics: Arc::new(OperationalMetrics::default()),
@@ -359,9 +380,18 @@ async fn enforce_bearer_rate_limit(
             .extensions()
             .get::<ConnectInfo<SocketAddr>>()
             .map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |peer| peer.0.ip());
+        let rate_key = request
+            .headers()
+            .get(header::AUTHORIZATION)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.strip_prefix("Bearer "))
+            .and_then(|token| state.vault.known_application_credential_lookup(token))
+            .map_or(AuthenticationRateKey::Peer(source), |lookup| {
+                AuthenticationRateKey::ApplicationCredential(lookup)
+            });
         if !state
             .bearer_rate_limiter
-            .allow(source, now_unix_ms(), BEARER_ATTEMPTS_PER_WINDOW)
+            .allow(rate_key, now_unix_ms(), BEARER_ATTEMPTS_PER_WINDOW)
         {
             state.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
             return ApiError::rate_limited(request_id(request.headers())).into_response();
@@ -433,6 +463,7 @@ async fn password_login(
         .login_rate_limiter
         .allow(source, now, LOGIN_ATTEMPTS_PER_WINDOW)
     {
+        state.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
         return Err(ApiError::rate_limited(request_id));
     }
     let permit = Arc::clone(&state.password_slots)
@@ -548,16 +579,28 @@ async fn finish_passkey_registration(
 
 async fn start_passkey_authentication(
     State(state): State<ApiState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    headers: HeaderMap,
 ) -> Result<Json<ChallengeResponse>, ApiError> {
+    let request_id = request_id(&headers);
+    let now = now_unix_ms();
+    let source = peer.map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |peer| peer.0.0.ip());
+    if !state
+        .passkey_rate_limiter
+        .allow(source, now, PASSKEY_ATTEMPTS_PER_WINDOW)
+    {
+        state.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+        return Err(ApiError::rate_limited(request_id));
+    }
     let challenge = state
         .passkeys
-        .start_authentication(&state.vault, now_unix_ms())
-        .map_err(|_| ApiError::authentication(RequestId::random()))?;
+        .start_authentication(&state.vault, now)
+        .map_err(|_| ApiError::authentication(request_id))?;
     Ok(Json(ChallengeResponse {
         ceremony_id: challenge.ceremony_id.to_string(),
         expires_at_unix_ms: challenge.expires_at_unix_ms,
         options: serde_json::to_value(challenge.options)
-            .map_err(|_| ApiError::unavailable(RequestId::random()))?,
+            .map_err(|_| ApiError::unavailable(request_id))?,
     }))
 }
 
@@ -569,10 +612,20 @@ struct FinishAuthenticationRequest {
 
 async fn finish_passkey_authentication(
     State(state): State<ApiState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
     headers: HeaderMap,
     Json(input): Json<FinishAuthenticationRequest>,
 ) -> Result<Response, ApiError> {
     let request_id = request_id(&headers);
+    let now = now_unix_ms();
+    let source = peer.map_or(IpAddr::V4(Ipv4Addr::LOCALHOST), |peer| peer.0.0.ip());
+    if !state
+        .passkey_rate_limiter
+        .allow(source, now, PASSKEY_ATTEMPTS_PER_WINDOW)
+    {
+        state.metrics.rate_limited.fetch_add(1, Ordering::Relaxed);
+        return Err(ApiError::rate_limited(request_id));
+    }
     let issued = state
         .passkeys
         .finish_authentication(
@@ -580,7 +633,7 @@ async fn finish_passkey_authentication(
             ceremony_id(&input.ceremony_id).ok_or_else(|| ApiError::invalid(request_id))?,
             &input.response,
             request_id,
-            now_unix_ms(),
+            now,
         )
         .map_err(|_| ApiError::authentication(request_id))?;
     Ok(session_response(issued))
@@ -1579,7 +1632,7 @@ struct RevokeCredentialRequest {
 async fn revoke_credential(
     State(state): State<ApiState>,
     headers: HeaderMap,
-    AxumPath((_service_id, credential_id_value)): AxumPath<(String, String)>,
+    AxumPath((service_id_value, credential_id_value)): AxumPath<(String, String)>,
     Json(input): Json<RevokeCredentialRequest>,
 ) -> Result<Json<RevisionResponse>, ApiError> {
     let now = now_unix_ms();
@@ -1589,6 +1642,7 @@ async fn revoke_credential(
         .vault
         .revoke_application_credential(
             owner,
+            principal_id(&service_id_value).map_err(|()| ApiError::not_found(request_id))?,
             credential_id(&credential_id_value).map_err(|()| ApiError::not_found(request_id))?,
             input.expected_revision,
             request_id,
@@ -3095,5 +3149,67 @@ mod tests {
             1_800_000_000_000 + super::LOGIN_WINDOW_MS,
             super::LOGIN_ATTEMPTS_PER_WINDOW
         ));
+
+        let first_credential = super::AuthenticationRateKey::ApplicationCredential([0x11; 12]);
+        let second_credential = super::AuthenticationRateKey::ApplicationCredential([0x22; 12]);
+        for _ in 0..super::BEARER_ATTEMPTS_PER_WINDOW {
+            assert!(limiter.allow(
+                first_credential,
+                1_800_000_100_000,
+                super::BEARER_ATTEMPTS_PER_WINDOW
+            ));
+        }
+        assert!(!limiter.allow(
+            first_credential,
+            1_800_000_100_001,
+            super::BEARER_ATTEMPTS_PER_WINDOW
+        ));
+        assert!(limiter.allow(
+            second_credential,
+            1_800_000_100_001,
+            super::BEARER_ATTEMPTS_PER_WINDOW
+        ));
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_passkey_ceremonies_have_an_independent_rate_limit() {
+        let (_root, state) = state();
+        for _ in 0..super::PASSKEY_ATTEMPTS_PER_WINDOW {
+            let response = router(state.clone())
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/api/v1/session/passkeys/authentication/options")
+                        .body(Body::empty())
+                        .unwrap_or_else(|error| panic!("passkey request must build: {error}")),
+                )
+                .await
+                .unwrap_or_else(|error| panic!("passkey request must respond: {error}"));
+            assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        }
+        let limited = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/session/passkeys/authentication/options")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("limited request must build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("limited request must respond: {error}"));
+        assert_eq!(limited.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        let password = router(state)
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/session/password")
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"password":"synthetic long password"}"#))
+                    .unwrap_or_else(|error| panic!("password request must build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("password request must respond: {error}"));
+        assert_eq!(password.status(), StatusCode::UNAUTHORIZED);
     }
 }

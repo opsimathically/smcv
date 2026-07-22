@@ -99,6 +99,8 @@ pub struct SessionInsert {
     pub absolute_expires_at_unix_ms: i64,
     pub recent_auth_at_unix_ms: i64,
     pub state_commitment: [u8; 32],
+    /// Authenticator commitment observed before authentication began.
+    pub expected_authenticator_state_commitment: [u8; 32],
     pub authenticator_state_commitment: [u8; 32],
     /// Updated passkey state after assertion verification, when applicable.
     pub authenticator_credential_data: Option<Vec<u8>>,
@@ -437,13 +439,15 @@ impl SqliteStore {
                SET last_used_at_unix_ms = ?1, state_commitment = ?2,
                    credential_data = COALESCE(?3, credential_data)
                WHERE authenticator_id = ?4 AND principal_id = ?5
-                 AND state = 'active' AND revoked_at_unix_ms IS NULL",
+                 AND state = 'active' AND revoked_at_unix_ms IS NULL
+                 AND state_commitment = ?6",
             params![
                 session.created_at_unix_ms,
                 session.authenticator_state_commitment.as_slice(),
                 session.authenticator_credential_data.as_deref(),
                 session.authenticator_id.as_bytes(),
                 session.principal_id.as_bytes(),
+                session.expected_authenticator_state_commitment.as_slice(),
             ],
         )? != 1
         {

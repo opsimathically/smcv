@@ -127,9 +127,13 @@ Separate limits apply to:
 - Password hashing and archive KDF work.
 - Backup/import size, record count, chunk size, and concurrent jobs.
 
-Phase 2 derives source limits from the TCP peer rather than forwarding headers:
-password attempts are limited to 10 per peer per minute, bearer requests to
-120, tracked source cardinality to 4,096, password work to four concurrent
+Phase 2 derives unauthenticated source limits from the TCP peer rather than
+forwarding headers: password attempts are limited to 10 per peer per minute
+and passkey authentication ceremony requests to 20 in a separate bucket.
+Known application credentials receive independent 120-request-per-minute
+buckets so one workload behind the same-host ingress cannot throttle another;
+malformed and unknown bearer tokens remain in the bounded peer bucket. Each
+limiter tracks at most 4,096 keys. Password work is limited to four concurrent
 Argon2id jobs, all requests to 128 concurrent operations, headers to 64/32 KiB,
 bodies to 1 MiB, and request time to 15 seconds. The authenticated archive
 verification and local recovery upload routes explicitly override those body
@@ -153,6 +157,11 @@ cleared and never trusted.
 - State-changing browser requests require a CSRF token bound to the session.
 - CORS is disabled by default; an allowlist is not a substitute for CSRF.
 - Session IDs rotate after login and privilege/recent-auth changes.
+- Session, authenticator, credential, and ceremony timestamps fail closed when
+  the wall clock moves earlier than already committed authentication state.
+- Session creation atomically compares the authenticator state observed during
+  verification, preventing concurrent assertions or revocation from being
+  overwritten by stale successful-login state.
 - Logout invalidates server state and clears site data where safe.
 - Sensitive content is not placed in URLs, browser storage, service-worker
   caches, or referrer-bearing navigation.

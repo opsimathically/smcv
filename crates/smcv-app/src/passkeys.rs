@@ -33,11 +33,13 @@ pub struct PasskeyChallenge<T> {
 struct RegistrationCeremony {
     principal_id: smcv_core::PrincipalId,
     session_id: smcv_core::SessionId,
+    created_at_unix_ms: i64,
     expires_at_unix_ms: i64,
     state: PasskeyRegistration,
 }
 
 struct AuthenticationCeremony {
+    created_at_unix_ms: i64,
     expires_at_unix_ms: i64,
     state: PasskeyAuthentication,
 }
@@ -148,6 +150,7 @@ impl PasskeyService {
             RegistrationCeremony {
                 principal_id: owner.principal_id(),
                 session_id: owner.session_id(),
+                created_at_unix_ms: now_unix_ms,
                 expires_at_unix_ms,
                 state,
             },
@@ -193,7 +196,8 @@ impl PasskeyService {
             )
             .map_err(map_authorization)?;
         let ceremony = self.take_registration(ceremony_id)?;
-        if ceremony.expires_at_unix_ms < now_unix_ms
+        if now_unix_ms < ceremony.created_at_unix_ms
+            || ceremony.expires_at_unix_ms < now_unix_ms
             || ceremony.principal_id != owner.principal_id()
             || ceremony.session_id != owner.session_id()
         {
@@ -300,6 +304,7 @@ impl PasskeyService {
         ceremonies.authentications.insert(
             ceremony_id,
             AuthenticationCeremony {
+                created_at_unix_ms: now_unix_ms,
                 expires_at_unix_ms,
                 state,
             },
@@ -326,7 +331,7 @@ impl PasskeyService {
         now_unix_ms: i64,
     ) -> Result<BrowserSessionSecrets, AuthenticationError> {
         let ceremony = self.take_authentication(ceremony_id)?;
-        if ceremony.expires_at_unix_ms < now_unix_ms {
+        if now_unix_ms < ceremony.created_at_unix_ms || ceremony.expires_at_unix_ms < now_unix_ms {
             return Err(AuthenticationError::Rejected);
         }
         let result = self
@@ -399,12 +404,12 @@ impl PasskeyService {
 }
 
 fn cleanup(ceremonies: &mut CeremonyState, now_unix_ms: i64) {
-    ceremonies
-        .registrations
-        .retain(|_, value| value.expires_at_unix_ms >= now_unix_ms);
-    ceremonies
-        .authentications
-        .retain(|_, value| value.expires_at_unix_ms >= now_unix_ms);
+    ceremonies.registrations.retain(|_, value| {
+        value.created_at_unix_ms <= now_unix_ms && value.expires_at_unix_ms >= now_unix_ms
+    });
+    ceremonies.authentications.retain(|_, value| {
+        value.created_at_unix_ms <= now_unix_ms && value.expires_at_unix_ms >= now_unix_ms
+    });
 }
 
 #[allow(

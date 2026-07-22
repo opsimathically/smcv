@@ -105,6 +105,23 @@ impl AuthenticatedService {
 }
 
 impl InitializedVault {
+    /// Returns the public lookup component only when it names a durable
+    /// application-credential record.
+    ///
+    /// This supports per-credential request throttling without allowing
+    /// attacker-selected, well-formed tokens to consume the bounded limiter's
+    /// entire key space. Storage failures and unknown tokens fail closed to
+    /// the caller's peer-level bucket.
+    #[must_use]
+    pub fn known_application_credential_lookup(&self, presented: &str) -> Option<[u8; 12]> {
+        let lookup = token_lookup_id(presented)?;
+        self.store
+            .application_credential_by_lookup(&lookup)
+            .ok()
+            .flatten()
+            .map(|_| lookup)
+    }
+
     /// Creates a service identity with encrypted owner-facing metadata.
     ///
     /// # Errors
@@ -467,6 +484,10 @@ impl InitializedVault {
         verify_application_credential_commitment(self, &record)?;
         if !matches
             || record.revoked_at_unix_ms.is_some()
+            || now_unix_ms < record.created_at_unix_ms
+            || record
+                .last_used_at_unix_ms
+                .is_some_and(|last_used| now_unix_ms < last_used)
             || record
                 .expires_at_unix_ms
                 .is_some_and(|expiry| expiry < now_unix_ms)
@@ -520,6 +541,7 @@ impl InitializedVault {
     pub fn revoke_application_credential(
         &self,
         owner: AuthenticatedOwner,
+        service_principal_id: PrincipalId,
         credential_id: CredentialId,
         expected_revision: u64,
         request_id: RequestId,
@@ -547,7 +569,10 @@ impl InitializedVault {
             .application_credential(credential_id)
             .map_err(map_storage)?;
         verify_application_credential_commitment(self, &record)?;
-        if record.revision != expected_revision || record.revoked_at_unix_ms.is_some() {
+        if record.principal_id != service_principal_id
+            || record.revision != expected_revision
+            || record.revoked_at_unix_ms.is_some()
+        {
             return Err(AuthenticationError::Rejected);
         }
         let next_revision = expected_revision
@@ -767,7 +792,7 @@ mod tests {
         time::Duration,
     };
 
-    use smcv_core::{ProtectedString, RequestId};
+    use smcv_core::{PrincipalId, ProtectedString, RequestId};
     use tempfile::TempDir;
 
     use crate::{
@@ -854,6 +879,21 @@ mod tests {
                 1_800_000_006_000,
             )
             .unwrap_or_else(|error| panic!("synthetic credential must issue: {error}"));
+        assert!(
+            vault
+                .known_application_credential_lookup(issued.plaintext.expose())
+                .is_some()
+        );
+        let attacker_token = format!(
+            "{}_{}.{}.{}",
+            "smcv", "v1", "AAAAAAAAAAAAAAAA", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        );
+        assert!(
+            vault
+                .known_application_credential_lookup(&attacker_token)
+                .is_none(),
+            "an attacker-selected valid token must remain in the peer limiter bucket"
+        );
         let authenticated = vault
             .authenticate_application_credential(&issued.plaintext, 1_800_000_007_000)
             .unwrap_or_else(|error| panic!("synthetic credential must authenticate: {error}"));
@@ -885,6 +925,19 @@ mod tests {
             Some(1_800_000_007_000)
         );
         assert_eq!(credential_page[0].revision, 2);
+        let credential_id = issued.credential_id;
+        assert!(
+            vault
+                .revoke_application_credential(
+                    owner,
+                    PrincipalId::random(),
+                    credential_id,
+                    2,
+                    RequestId::random(),
+                    1_800_000_008_400,
+                )
+                .is_err()
+        );
         let guarded_request = vault
             .authorized(
                 RequestPrincipal::Service(authenticated),
@@ -895,13 +948,13 @@ mod tests {
         let (started_sender, started_receiver) = mpsc::channel();
         let (result_sender, result_receiver) = mpsc::channel();
         let revoking_vault = Arc::clone(&vault);
-        let credential_id = issued.credential_id;
         let revoker = std::thread::spawn(move || {
             started_sender
                 .send(())
                 .unwrap_or_else(|error| panic!("start signal must send: {error}"));
             let result = revoking_vault.revoke_application_credential(
                 owner,
+                service_id,
                 credential_id,
                 2,
                 RequestId::random(),

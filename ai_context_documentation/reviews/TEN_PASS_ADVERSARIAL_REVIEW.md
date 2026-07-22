@@ -64,3 +64,22 @@ test suites, the frozen AEAD/metadata/archive compatibility fixtures, hostile
 credential properties, wrong-key/corruption checks, rotation restart tests,
 and the new custody-parent symlink rejection. No Pass 2 critical/high finding
 remains open.
+
+## Pass 3 — authentication, sessions, CSRF, WebAuthn, and credentials
+
+Perspective: a credential holder racing revocation, a hostile unauthenticated
+client, multiple services behind the supported same-host ingress, a path-ID
+confusion attacker, and a host clock that moves backward. Result: **five
+findings repaired and retested**.
+
+| ID | Severity | Finding | Repair and verification |
+|---|---|---|---|
+| A10-R3-001 | High | Successful session creation updated an authenticator by ID without comparing the state that had actually been verified. Concurrent WebAuthn assertions could overwrite one another's authenticator data/counter, and a stale successful authentication could race later authenticator state. | Session creation now atomically compares the verified authenticator commitment while inserting the session, advancing last use, and persisting new WebAuthn state. Any stale observation rolls back the entire transaction. A deterministic stale-password-authenticator regression proves that a second session cannot be created from the old observation. |
+| A10-R3-002 | Medium | The unauthenticated passkey authentication options and verification routes could repeatedly allocate/consume the bounded in-process ceremony store without a source limit. | Both routes now share a dedicated 20-request-per-peer/minute passkey bucket, independent from the 10-attempt password bucket, and increment the aggregate rate-limit metric. Integration coverage exhausts passkey capacity, receives `429`, and proves password authentication remains in its separate bucket. |
+| A10-R3-003 | Medium | Bearer requests were limited only by direct peer IP. Under the required same-host proxy, one noisy or compromised service could therefore consume the 120-request bucket for every other service. Naively accepting attacker-selected token lookups as limiter keys would also permit bounded-map exhaustion. | Durable application credentials now receive independent buckets keyed by their public random lookup. Malformed, well-formed-but-unknown, and storage-error lookups use the peer bucket and cannot allocate arbitrary credential keys. Unit/domain tests prove credential isolation and reject an attacker-selected valid token as a durable key. |
+| A10-R3-004 | Medium | Session, owner-context, authenticator, application-credential, and passkey-ceremony checks enforced upper expiry bounds but did not reject times earlier than already observed durable/process state. A backward clock could therefore reuse an older validity position or mutate last-use state backward. | Every affected authentication boundary now rejects a time before creation or committed last use; request-scoped owner contexts also carry a lower validity bound, and ceremony cleanup removes rollback-invalid entries. Session regression coverage exercises the backward-clock rejection. |
+| A10-R3-005 | Medium | `POST /service-identities/{service}/credentials/{credential}/revoke` parsed only the credential ID and ignored the parent service ID, so a valid credential could be revoked through a false resource hierarchy. | The application boundary now requires the parent service principal and compares it to the credential owner before mutation. Regression coverage proves a mismatched parent fails without revoking and the correct parent retains the existing linearized revoke behavior. |
+
+Validation includes focused authentication/service-identity regressions, the
+complete server integration suite, strict all-feature Clippy, and the full
+repository gate. No Pass 3 critical/high finding remains open.

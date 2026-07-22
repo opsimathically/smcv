@@ -70,6 +70,7 @@ pub struct AuthenticatedOwner {
     authenticator_id: AuthenticatorId,
     /// Whether the configured recent-authentication window is still valid.
     recent_auth_until_unix_ms: i64,
+    valid_from_unix_ms: i64,
     valid_until_unix_ms: i64,
 }
 
@@ -102,7 +103,7 @@ impl AuthenticatedOwner {
     /// bounded server-side session window.
     #[must_use]
     pub const fn is_valid_at(&self, now_unix_ms: i64) -> bool {
-        now_unix_ms <= self.valid_until_unix_ms
+        now_unix_ms >= self.valid_from_unix_ms && now_unix_ms <= self.valid_until_unix_ms
     }
 }
 
@@ -339,6 +340,8 @@ impl InitializedVault {
             .ok_or(AuthenticationError::Rejected)?;
         verify_session_commitment(self, &session)?;
         if session.revoked_at_unix_ms.is_some()
+            || now_unix_ms < session.created_at_unix_ms
+            || now_unix_ms < session.last_used_at_unix_ms
             || session.idle_expires_at_unix_ms < now_unix_ms
             || session.absolute_expires_at_unix_ms < now_unix_ms
             || !verify_session(
@@ -402,6 +405,7 @@ impl InitializedVault {
                 .recent_auth_at_unix_ms
                 .checked_add(RECENT_AUTH_MS)
                 .ok_or(AuthenticationError::Rejected)?,
+            valid_from_unix_ms: now_unix_ms,
             valid_until_unix_ms: next_idle,
         })
     }
@@ -474,6 +478,13 @@ impl InitializedVault {
         request_id: RequestId,
         now_unix_ms: i64,
     ) -> Result<BrowserSessionSecrets, AuthenticationError> {
+        if now_unix_ms < authenticator.created_at_unix_ms
+            || authenticator
+                .last_used_at_unix_ms
+                .is_some_and(|last_used| now_unix_ms < last_used)
+        {
+            return Err(AuthenticationError::Rejected);
+        }
         let issued = issue_session(self.token_verifier_key())
             .map_err(|_| AuthenticationError::Unavailable)?;
         let session_id = SessionId::random();
@@ -535,6 +546,7 @@ impl InitializedVault {
             absolute_expires_at_unix_ms,
             recent_auth_at_unix_ms: now_unix_ms,
             state_commitment: durable_session_commitment,
+            expected_authenticator_state_commitment: authenticator.state_commitment,
             authenticator_state_commitment: durable_authenticator_commitment,
             authenticator_credential_data: updated_credential_data,
         };
@@ -753,6 +765,8 @@ pub(crate) fn verify_owner_context_active(
     verify_session_commitment(vault, &session)?;
     if session.principal_id != owner.principal_id()
         || session.revoked_at_unix_ms.is_some()
+        || now_unix_ms < session.created_at_unix_ms
+        || now_unix_ms < session.last_used_at_unix_ms
         || session.idle_expires_at_unix_ms < now_unix_ms
         || session.absolute_expires_at_unix_ms < now_unix_ms
     {
@@ -780,6 +794,7 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     use smcv_core::{ProtectedString, RequestId};
+    use smcv_storage::{AuthenticatorKind, OwnerAuthenticatorRecord, PrincipalRecord};
     use tempfile::TempDir;
 
     use crate::{LocalSetupCapability, RequestPrincipal, initialize_vault};
@@ -806,6 +821,24 @@ mod tests {
         (root, vault)
     }
 
+    fn owner_and_password_authenticator(
+        vault: &crate::InitializedVault,
+    ) -> (PrincipalRecord, OwnerAuthenticatorRecord) {
+        let owner = vault
+            .store
+            .owner_principal()
+            .unwrap_or_else(|error| panic!("synthetic owner must load: {error}"))
+            .unwrap_or_else(|| panic!("synthetic owner must exist"));
+        let authenticator = vault
+            .store
+            .owner_authenticators(AuthenticatorKind::Password)
+            .unwrap_or_else(|error| panic!("synthetic authenticator must load: {error}"))
+            .into_iter()
+            .next()
+            .unwrap_or_else(|| panic!("synthetic authenticator must exist"));
+        (owner, authenticator)
+    }
+
     #[test]
     fn local_enrollment_password_login_session_and_csrf_round_trip() {
         let (_root, vault) = fixture();
@@ -818,9 +851,22 @@ mod tests {
                 1_800_000_001_000,
             )
             .unwrap_or_else(|error| panic!("synthetic owner must enroll: {error}"));
+        let (owner, stale_authenticator) = owner_and_password_authenticator(&vault);
         let issued = vault
             .login_with_password(&password, RequestId::random(), 1_800_000_002_000)
             .unwrap_or_else(|error| panic!("synthetic owner must login: {error}"));
+        assert!(
+            vault
+                .create_browser_session(
+                    &owner,
+                    &stale_authenticator,
+                    None,
+                    RequestId::random(),
+                    1_800_000_002_001,
+                )
+                .is_err(),
+            "a stale authenticator observation must not create another session"
+        );
         let authenticated = vault
             .authenticate_browser_session(
                 &issued.session_token,
@@ -832,6 +878,17 @@ mod tests {
 
         assert_eq!(authenticated.principal_id(), principal);
         assert!(authenticated.is_recent_at(1_800_000_003_000));
+        assert!(!authenticated.is_valid_at(1_800_000_002_999));
+        assert!(
+            vault
+                .authenticate_browser_session(
+                    &issued.session_token,
+                    Some(&issued.csrf_token),
+                    true,
+                    1_800_000_002_999,
+                )
+                .is_err()
+        );
         assert!(!format!("{issued:?}").contains("synthetic long password"));
         assert!(
             vault
