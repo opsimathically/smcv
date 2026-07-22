@@ -1,6 +1,6 @@
 # Cryptography and key management
 
-Status: **Committed construction requirements; primitive selection proposed**
+Status: **Committed construction and primitive selection**
 Last reviewed: 2026-07-21
 
 ## Rules
@@ -17,7 +17,7 @@ Last reviewed: 2026-07-21
 
 ## Vault key hierarchy
 
-The proposed hierarchy is:
+The committed hierarchy is:
 
 ```text
 external root key material
@@ -34,9 +34,10 @@ provider locator, salt, wrapped KEK, key version, and verification metadata,
 but never the root material needed to unwrap the KEK.
 
 A random DEK per version confines nonce accounting and permits inexpensive KEK
-rotation. The Phase 0 cryptographic decision record must select the exact AEAD,
-wrapping construction, nonce generation rule, tag size, and maintained crate,
-with test vectors and misuse analysis.
+rotation. Phase 0 selected XChaCha20-Poly1305, fresh random 192-bit nonces,
+128-bit tags, and the maintained RustCrypto implementation. The exact encoding,
+test vector, and misuse analysis are committed in
+`PHASE_0_TECHNICAL_DECISIONS.md`.
 
 ## Record envelope
 

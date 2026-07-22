@@ -5,8 +5,8 @@ vault written in Rust. It gives people a polished web interface for managing
 encrypted secrets and gives applications narrowly scoped, revocable API
 access to only the secrets and operations they require.
 
-The project is currently in documentation and implementation-planning. No
-production implementation exists yet.
+The project is under active implementation. The engineering foundation exists,
+but the server is not yet a usable or production-ready vault.
 
 ## Committed product direction
 
@@ -33,12 +33,14 @@ production implementation exists yet.
 
 ## Current status
 
-The documentation foundation was completed and adversarially reviewed on
-2026-07-21. The project is ready to begin
-[Phase 0](ai_phased_plans/PHASE_00_FOUNDATIONS.md); implementation has not yet
-started. See the
-[implementation-readiness index](ai_phased_plans/IMPLEMENTATION_READINESS.md)
-and [documentation evidence](ai_phase_evidence/DOCUMENTATION_FOUNDATION.md).
+The documentation foundation and [Phase 0 engineering
+baseline](ai_phase_evidence/PHASE_0_EXIT_REPORT.md) passed adversarial review on
+2026-07-21. [Phase 1 encrypted vault core](ai_phased_plans/PHASE_01_CRYPTO_STORAGE.md)
+is active. Run the complete local verification gate with:
+
+```sh
+./scripts/check.sh
+```
 
 Phases 0–6 are designed to run continuously under one implementation goal.
 There is no pilot, beta, external-user, adoption, owner-approval, or external

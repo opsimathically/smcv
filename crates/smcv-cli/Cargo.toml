@@ -1,0 +1,13 @@
+[package]
+name = "smcv-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[dependencies]
+clap.workspace = true
+smcv-app = { version = "=0.1.0", path = "../smcv-app" }
+
+[lints]
+workspace = true

@@ -1,0 +1,58 @@
+openapi: 3.1.0
+info:
+  title: SMCV API
+  version: 0.1.0
+  description: >-
+    Phase 0 contract skeleton. Protected resource schemas and operations are
+    added in Phase 2 from the same versioned contract.
+servers:
+  - url: /api/v1
+paths:
+  /session:
+    get:
+      operationId: getSession
+      summary: Return safe current-session state
+      responses:
+        "200":
+          description: Current session state
+          headers:
+            Cache-Control:
+              schema:
+                type: string
+              description: Always no-store for session data.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SessionState"
+        "401":
+          $ref: "#/components/responses/Problem"
+components:
+  schemas:
+    SessionState:
+      type: object
+      additionalProperties: false
+      required: [authenticated]
+      properties:
+        authenticated:
+          type: boolean
+    Problem:
+      type: object
+      additionalProperties: false
+      required: [code, message, request_id]
+      properties:
+        code:
+          type: string
+          maxLength: 64
+        message:
+          type: string
+          maxLength: 256
+        request_id:
+          type: string
+          format: uuid
+  responses:
+    Problem:
+      description: Safe error response
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"

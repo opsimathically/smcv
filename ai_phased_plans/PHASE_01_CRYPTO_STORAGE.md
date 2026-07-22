@@ -1,6 +1,6 @@
 # Phase 1: encrypted vault and storage core
 
-Status: **Planned**
+Status: **Active implementation phase**
 
 ## Objective
 

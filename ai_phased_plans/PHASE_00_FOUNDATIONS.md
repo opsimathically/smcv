@@ -1,6 +1,6 @@
 # Phase 0: engineering and security foundations
 
-Status: **Planned — next implementation phase**
+Status: **Completed — evidence passed 2026-07-21**
 
 ## Objective
 

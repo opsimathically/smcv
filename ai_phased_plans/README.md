@@ -1,13 +1,12 @@
 # SMCV implementation phases
 
-Status: **Implementation has not started**
+Status: **Phase 1 active; Phase 0 passed**
 Last reviewed: 2026-07-21
 
 ## Active phase
 
-The next phase is [Phase 0: engineering and security foundations](PHASE_00_FOUNDATIONS.md).
-It may begin only after the
-[implementation-readiness index](IMPLEMENTATION_READINESS.md) is satisfied.
+The active phase is [Phase 1: encrypted vault core](PHASE_01_CRYPTO_STORAGE.md).
+[Phase 0](PHASE_00_FOUNDATIONS.md) passed its evidence gate on 2026-07-21.
 Requirement ownership is tracked in the
 [requirements traceability matrix](REQUIREMENTS_TRACEABILITY.md).
 

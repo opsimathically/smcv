@@ -16,6 +16,7 @@ survive individual work sessions. Decision status is governed by
 - [System architecture](SYSTEM_ARCHITECTURE.md)
 - [Threat and trust model](THREAT_AND_TRUST_MODEL.md)
 - [Cryptography and key management](CRYPTOGRAPHY_AND_KEY_MANAGEMENT.md)
+- [Phase 0 technical decisions](PHASE_0_TECHNICAL_DECISIONS.md)
 - [Data model](DATA_MODEL.md)
 - [Identity and authorization model](AUTHORIZATION_MODEL.md)
 - [API design](API_DESIGN.md)
