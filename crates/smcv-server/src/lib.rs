@@ -10,7 +10,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use axum::{
@@ -125,12 +125,21 @@ pub struct ApiState {
     vault: Arc<InitializedVault>,
     passkeys: Arc<PasskeyService>,
     password_slots: Arc<Semaphore>,
+    archive_slots: Arc<Semaphore>,
     login_rate_limiter: Arc<LoginRateLimiter>,
     passkey_rate_limiter: Arc<LoginRateLimiter>,
     bearer_rate_limiter: Arc<LoginRateLimiter>,
     backup_jobs: Arc<backup_jobs::BackupJobRegistry>,
     metrics: Arc<OperationalMetrics>,
+    readiness: Arc<ReadinessCache>,
 }
+
+struct ReadinessCache {
+    value: Mutex<Option<(Instant, bool)>>,
+    slot: Arc<Semaphore>,
+}
+
+const READINESS_CACHE_TTL: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct OperationalMetrics {
@@ -170,11 +179,16 @@ impl ApiState {
             vault: Arc::new(vault),
             passkeys: Arc::new(passkeys),
             password_slots: Arc::new(Semaphore::new(4)),
+            archive_slots: Arc::new(Semaphore::new(1)),
             login_rate_limiter: Arc::new(LoginRateLimiter::default()),
             passkey_rate_limiter: Arc::new(LoginRateLimiter::default()),
             bearer_rate_limiter: Arc::new(LoginRateLimiter::default()),
             backup_jobs: Arc::new(backup_jobs),
             metrics: Arc::new(OperationalMetrics::default()),
+            readiness: Arc::new(ReadinessCache {
+                value: Mutex::new(None),
+                slot: Arc::new(Semaphore::new(1)),
+            }),
         })
     }
 
@@ -182,6 +196,34 @@ impl ApiState {
     #[must_use]
     pub fn vault(&self) -> &InitializedVault {
         &self.vault
+    }
+
+    async fn is_ready(&self) -> bool {
+        if let Ok(cache) = self.readiness.value.lock()
+            && let Some((checked_at, value)) = *cache
+            && checked_at.elapsed() < READINESS_CACHE_TTL
+        {
+            return value;
+        }
+        let Ok(_slot) = Arc::clone(&self.readiness.slot).acquire_owned().await else {
+            return false;
+        };
+        if let Ok(cache) = self.readiness.value.lock()
+            && let Some((checked_at, value)) = *cache
+            && checked_at.elapsed() < READINESS_CACHE_TTL
+        {
+            return value;
+        }
+        let vault = Arc::clone(&self.vault);
+        let value = tokio::task::spawn_blocking(move || {
+            vault.store.quick_integrity_check().unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false);
+        if let Ok(mut cache) = self.readiness.value.lock() {
+            *cache = Some((Instant::now(), value));
+        }
+        value
     }
 }
 
@@ -327,6 +369,7 @@ pub fn operational_router(state: ApiState) -> Router {
         .route("/metrics", get(operations::metrics))
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
+        .layer(ConcurrencyLimitLayer::new(16))
         .layer(middleware::from_fn(enforce_header_limits))
         .with_state(state)
 }
@@ -428,7 +471,7 @@ async fn ready(State(state): State<ApiState>) -> Result<Json<StatusResponse>, Ap
         .metrics
         .readiness_checks
         .fetch_add(1, Ordering::Relaxed);
-    if state.vault.store.quick_integrity_check().unwrap_or(false) {
+    if state.is_ready().await {
         Ok(Json(StatusResponse { status: "ready" }))
     } else {
         state

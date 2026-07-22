@@ -138,21 +138,25 @@ Known application credentials receive independent 120-request-per-minute
 buckets so one workload behind the same-host ingress cannot throttle another;
 malformed and unknown bearer tokens remain in the bounded peer bucket. Each
 limiter tracks at most 4,096 keys. Password work is limited to four concurrent
-Argon2id jobs, all requests to 128 concurrent operations, headers to 64/32 KiB,
+Argon2id jobs, archive creation/verification to one independent slot, all
+requests to 128 concurrent operations, headers to 64/32 KiB,
 bodies to 1 MiB, and request time to 15 seconds. The authenticated archive
 verification and local recovery upload routes explicitly override those body
 and time bounds up to the documented 8 GiB web-import limit and 15-minute
 operation window; archive framing enforces its own tighter structural bounds.
-Expensive online backup and verification work shares a four-slot semaphore.
-Phase 5 calibrates production limits and proxy deployment rules. Saturation
-returns a safe rate-limit or timeout response.
+Online backup and verification share the single archive slot, a 256 MiB
+logical-stream ceiling, and a 256 MiB maximum archive KDF memory parameter, so
+archive work cannot consume login capacity or multiply its peak memory fourfold.
+Saturation returns a safe rate-limit or timeout response.
 
 Operational metrics are not part of `/api/v1` and are never served by the
 product listener. When enabled, a separate loopback-only listener exposes a
 fixed vocabulary of aggregate counters without route, actor, source, object,
 vault, installation, or user-controlled labels. Production product binding is
 also loopback-only behind the documented TLS ingress; forwarding headers are
-cleared and never trusted.
+cleared and never trusted. Readiness integrity work runs on a blocking worker,
+is serialized and cached for five seconds, and the operational listener accepts
+at most 16 concurrent requests.
 
 ## Browser security
 
@@ -196,5 +200,7 @@ opaque artifact reference so disconnecting the browser does not cancel or
 misreport work. Cancellation states whether server work was stopped or only the
 client detached. Encrypted download artifacts use opaque randomized names,
 restrictive creation permissions, per-owner quotas, short expiry, and explicit
-deletion after download/expiry. The UI never treats server retention as proof
-that the owner has an off-host backup.
+deletion after download/expiry. Expiry starts from a terminal result and never
+removes state beneath a running worker. The UI records only that an HTTP
+download was started; it never treats that as proof of transfer completion or
+off-host custody.

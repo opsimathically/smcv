@@ -24,7 +24,7 @@ read reaches exact EOF.
 | 14 | 2 | Total header bytes, 126–256 |
 | 16 | 16 | Random archive ID |
 | 32 | 1 | Salt bytes, 16–32 for passphrase or zero for recovery |
-| 33 | 4 | Argon2 memory KiB, 65,536–1,048,576 in passphrase mode |
+| 33 | 4 | Argon2 memory KiB, 65,536–262,144 in passphrase mode |
 | 37 | 4 | Argon2 iterations, 1–10 in passphrase mode |
 | 41 | 1 | Argon2 lanes, 1–4 in passphrase mode |
 | 42 | 4 | Plaintext chunk bytes, 16 KiB–4 MiB |
@@ -79,7 +79,7 @@ Each record is `kind:u16, flags:u16, payload_length:u32, payload`. V1 accepts
 only critical flag bit zero and rejects every other bit. A reader that does not
 understand a critical record kind rejects the archive before activation.
 Individual v1 logical records are limited to 32 MiB; the application currently
-sets a provisional 1 GiB total logical-stream limit and 8 GiB archive-file
+sets a 256 MiB total logical-stream limit and 8 GiB archive-file
 limit below the framing layer's absolute 64 GiB ceiling.
 
 Closed v1 kinds are:

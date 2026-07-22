@@ -1375,7 +1375,7 @@ async function renderBackupCreate() {
       }
     }
   });
-  page.append(pageHeader("Portable recovery", "Create backup", "Created, verified, downloaded, and restore-tested are distinct states."), form);
+  page.append(pageHeader("Portable recovery", "Create backup", "Created, verified, download-started, and restore-tested are distinct states."), form);
   mode.focus();
 }
 
@@ -1501,7 +1501,7 @@ async function renderBackups() {
           className: "button primary",
           href: `/api/v1/backups/${job.job_id}/download`,
           download: `${job.job_id}.smcvault`,
-          text: job.downloaded ? "Download again" : "Download archive",
+          text: job.download_started ? "Download again" : "Download archive",
         }));
       }
       const remove = element("button", { className: "button secondary", type: "button", text: "Delete server artifact", disabled: ["pending", "running"].includes(job.state) ? "" : null });
@@ -1526,7 +1526,7 @@ async function renderBackups() {
         element("div", {}, [
           element("div", { className: "data-row-title mono", text: job.archive_id || job.job_id }),
           element("div", { className: "data-row-meta", text: `Created ${formatDate(job.created_at_unix_ms)} · expires ${formatDate(job.expires_at_unix_ms)}` }),
-          element("div", { className: "data-row-meta", text: `${formatBytes(job.archive_bytes)} · ${job.record_count ?? "unknown"} logical records · format ${job.format_version ?? "pending"} · ${job.downloaded ? "downloaded" : "not downloaded"}` }),
+          element("div", { className: "data-row-meta", text: `${formatBytes(job.archive_bytes)} · ${job.record_count ?? "unknown"} logical records · format ${job.format_version ?? "pending"} · ${job.download_started ? "download started" : "download not started"}` }),
           element("div", { className: "data-row-meta mono", text: job.logical_vault_id ? `Logical vault ${job.logical_vault_id} · recovery epoch ${job.source_recovery_epoch}` : "Logical vault metadata pending verification" }),
         ]),
         element("span", { className: `badge ${statusClass}`, text: status }),
@@ -1623,14 +1623,14 @@ async function renderOverview() {
     // The overview remains useful while the dedicated backup page reports details.
   }
   const verified = backups.filter((job) => job.state === "completed");
-  const downloaded = verified.some((job) => job.downloaded);
+  const downloadStarted = verified.some((job) => job.download_started);
   clear(page);
   page.append(
     pageHeader("Current state", "Overview", "Actionable vault, access, and recovery state. Counts do not imply that every item has been reviewed."),
     element("div", { className: "grid cards" }, [
       metricCard("Vault process", "Unlocked", "Ready", "success"),
       metricCard("Verified backups", String(verified.length), verified.length > 0 ? "Created and verified" : "None", verified.length > 0 ? "success" : "warning"),
-      metricCard("Backup custody", downloaded ? "Download observed" : "Not confirmed here", "Off-host copy unproven", "warning"),
+      metricCard("Backup custody", downloadStarted ? "Download started" : "Not confirmed here", "Completion and off-host copy unproven", "warning"),
       metricCard("Restore drill", "No browser record", "Not tested", "neutral"),
     ]),
     element("section", { className: "card" }, [
@@ -1647,7 +1647,7 @@ function renderPlaceholder(route) {
     applications: ["Workload identities", "Applications", "Create narrowly scoped identities and rotate their display-once credentials."],
     access: ["Effective authority", "Access policies", "Review actor, action, resource, and inherited namespace scope before granting access."],
     activity: ["Security history", "Activity", "Audit events distinguish identity, credential, action, target, decision, and absolute time."],
-    backups: ["Portable recovery", "Backup and recovery", "Created, verified, downloaded, and restore-tested are separate states."],
+    backups: ["Portable recovery", "Backup and recovery", "Created, verified, download-started, and restore-tested are separate states."],
     settings: ["Local installation", "Settings", "Review installation-bound behavior, passkeys, key maintenance, and session state."],
   };
   const [eyebrow, title, description] = labels[route];

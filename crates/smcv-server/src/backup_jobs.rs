@@ -57,7 +57,8 @@ struct BackupJobRecord {
     source_recovery_epoch: Option<u64>,
     archive_bytes: Option<u64>,
     record_count: Option<u64>,
-    downloaded: bool,
+    #[serde(default, alias = "downloaded")]
+    download_started: bool,
     error_code: Option<String>,
 }
 
@@ -119,6 +120,7 @@ impl BackupJobRegistry {
 
     fn load_statuses(&self) -> Result<(), std::io::Error> {
         let mut loaded = HashMap::new();
+        let now = now_unix_ms();
         for entry in fs::read_dir(&self.directory)? {
             let entry = entry?;
             let name = entry.file_name();
@@ -133,21 +135,63 @@ impl BackupJobRegistry {
                 fs::remove_dir_all(entry.path())?;
                 continue;
             }
-            if entry.path().extension().and_then(|value| value.to_str()) != Some("json")
-                || entry.metadata()?.len() > 64 * 1024
-            {
+            if entry.path().extension().and_then(|value| value.to_str()) != Some("json") {
                 continue;
+            }
+            let file_type = entry.file_type()?;
+            let metadata = entry.metadata()?;
+            if !file_type.is_file() || metadata.len() > 64 * 1024 {
+                return Err(std::io::Error::other("backup status file is invalid"));
             }
             let mut record: BackupJobRecord =
                 serde_json::from_reader(BufReader::new(File::open(entry.path())?))
                     .map_err(std::io::Error::other)?;
+            if name != format!("{}.json", record.job_id)
+                || record.created_at_unix_ms < 0
+                || record.updated_at_unix_ms < record.created_at_unix_ms
+                || record.expires_at_unix_ms <= record.created_at_unix_ms
+            {
+                return Err(std::io::Error::other("backup status record is invalid"));
+            }
+            if matches!(record.state, JobState::Completed | JobState::Failed)
+                && record.expires_at_unix_ms <= now
+            {
+                remove_if_exists(&self.artifact_path(record.job_id))?;
+                remove_if_exists(&entry.path())?;
+                continue;
+            }
             if matches!(record.state, JobState::Pending | JobState::Running) {
                 record.state = JobState::Failed;
                 record.error_code = Some("interrupted".to_owned());
-                record.updated_at_unix_ms = now_unix_ms();
+                record.updated_at_unix_ms = record.updated_at_unix_ms.max(now);
+                record.expires_at_unix_ms = record
+                    .updated_at_unix_ms
+                    .saturating_add(JOB_TTL_MS)
+                    .max(record.created_at_unix_ms.saturating_add(1));
+                remove_if_exists(&self.artifact_path(record.job_id))?;
                 self.persist(&record)?;
             }
+            if loaded.len() >= MAX_JOBS {
+                return Err(std::io::Error::other("backup job quota exceeded on disk"));
+            }
             loaded.insert(record.job_id, record);
+        }
+        for entry in fs::read_dir(&self.directory)? {
+            let entry = entry?;
+            let name = entry.file_name();
+            let Some(job_id) = name
+                .to_str()
+                .and_then(|name| name.strip_suffix(".smcvault"))
+                .and_then(|name| Uuid::parse_str(name).ok())
+            else {
+                continue;
+            };
+            if !loaded
+                .get(&job_id)
+                .is_some_and(|record| record.state == JobState::Completed)
+            {
+                remove_if_exists(&entry.path())?;
+            }
         }
         *self
             .jobs
@@ -177,7 +221,7 @@ impl BackupJobRegistry {
             source_recovery_epoch: None,
             archive_bytes: None,
             record_count: None,
-            downloaded: false,
+            download_started: false,
             error_code: None,
         };
         self.persist(&record)?;
@@ -194,12 +238,15 @@ impl BackupJobRegistry {
             .jobs
             .lock()
             .map_err(|_| std::io::Error::other("job registry unavailable"))?;
-        let record = jobs
-            .get_mut(&job_id)
+        let mut candidate = jobs
+            .get(&job_id)
+            .cloned()
             .ok_or_else(|| std::io::Error::other("backup job missing"))?;
-        update(record);
-        record.updated_at_unix_ms = now_unix_ms();
-        self.persist(record)
+        update(&mut candidate);
+        candidate.updated_at_unix_ms = candidate.updated_at_unix_ms.max(now_unix_ms());
+        self.persist(&candidate)?;
+        jobs.insert(job_id, candidate);
+        Ok(())
     }
 
     fn get(&self, job_id: Uuid) -> Option<BackupJobRecord> {
@@ -221,23 +268,24 @@ impl BackupJobRegistry {
     }
 
     fn cleanup_expired(&self, now: i64) -> Result<(), std::io::Error> {
-        let expired = {
-            let mut jobs = self
-                .jobs
-                .lock()
-                .map_err(|_| std::io::Error::other("job registry unavailable"))?;
-            let expired: Vec<Uuid> = jobs
-                .iter()
-                .filter_map(|(id, job)| (job.expires_at_unix_ms <= now).then_some(*id))
-                .collect();
-            for id in &expired {
-                jobs.remove(id);
-            }
-            expired
-        };
+        let mut jobs = self
+            .jobs
+            .lock()
+            .map_err(|_| std::io::Error::other("job registry unavailable"))?;
+        let expired: Vec<Uuid> = jobs
+            .iter()
+            .filter_map(|(id, job)| {
+                (matches!(job.state, JobState::Completed | JobState::Failed)
+                    && job.expires_at_unix_ms <= now)
+                    .then_some(*id)
+            })
+            .collect();
+        for id in &expired {
+            remove_if_exists(&self.artifact_path(*id))?;
+            remove_if_exists(&self.status_path(*id))?;
+        }
         for id in expired {
-            remove_if_exists(&self.artifact_path(id))?;
-            remove_if_exists(&self.status_path(id))?;
+            jobs.remove(&id);
         }
         Ok(())
     }
@@ -247,9 +295,9 @@ impl BackupJobRegistry {
             .jobs
             .lock()
             .map_err(|_| std::io::Error::other("job registry unavailable"))?;
-        let _removed = jobs.remove(&job_id);
         remove_if_exists(&self.artifact_path(job_id))?;
         remove_if_exists(&self.status_path(job_id))?;
+        let _removed = jobs.remove(&job_id);
         Ok(())
     }
 
@@ -257,6 +305,7 @@ impl BackupJobRegistry {
         let temporary = self
             .directory
             .join(format!(".status-{}.tmp", Uuid::new_v4()));
+        let _cleanup = RemoveFileOnDrop::new(temporary.clone());
         let mut file = OpenOptions::new()
             .write(true)
             .create_new(true)
@@ -266,7 +315,8 @@ impl BackupJobRegistry {
         file.write_all(b"\n")?;
         file.sync_all()?;
         fs::rename(&temporary, self.status_path(record.job_id))?;
-        File::open(&self.directory)?.sync_all()
+        File::open(&self.directory)?.sync_all()?;
+        Ok(())
     }
 
     fn artifact_path(&self, job_id: Uuid) -> PathBuf {
@@ -327,7 +377,7 @@ pub(super) struct BackupStatusResponse {
     source_recovery_epoch: Option<u64>,
     archive_bytes: Option<u64>,
     record_count: Option<u64>,
-    downloaded: bool,
+    download_started: bool,
     error_code: Option<String>,
 }
 
@@ -399,22 +449,28 @@ pub(super) async fn create_backup(
         .map_err(|_| ApiError::unavailable(request))?
         .ok_or_else(|| ApiError::unavailable(request))?
         .recovery_epoch;
-    let expensive_slot = Arc::clone(&state.password_slots)
+    let expensive_slot = Arc::clone(&state.archive_slots)
         .try_acquire_owned()
         .map_err(|_| ApiError::rate_limited(request))?;
     let job = state
         .backup_jobs
         .create(now)
         .map_err(|_| ApiError::unavailable(request))?;
+    state
+        .backup_jobs
+        .update(job.job_id, |record| record.state = JobState::Running)
+        .map_err(|_| ApiError::unavailable(request))?;
     let jobs = Arc::clone(&state.backup_jobs);
     let artifact = jobs.artifact_path(job.job_id);
     let job_id = job.job_id;
     tokio::task::spawn_blocking(move || {
         let _expensive_slot = expensive_slot;
-        let _running = jobs.update(job_id, |record| record.state = JobState::Running);
         if let Ok(report) = vault.create_backup_file(&artifact, key.borrowed(), now_unix_ms()) {
-            let _completed = jobs.update(job_id, |record| {
+            let completed = jobs.update(job_id, |record| {
                 record.state = JobState::Completed;
+                record.expires_at_unix_ms = now_unix_ms()
+                    .max(record.created_at_unix_ms)
+                    .saturating_add(JOB_TTL_MS);
                 record.archive_id = Some(report.archive_id);
                 record.format_version = Some(smcv_backup::FORMAT_VERSION);
                 record.logical_vault_id = Some(logical_vault_id);
@@ -422,10 +478,23 @@ pub(super) async fn create_backup(
                 record.archive_bytes = Some(report.archive_bytes);
                 record.record_count = Some(report.record_count);
             });
+            if completed.is_err() {
+                let _cleanup = remove_if_exists(&artifact);
+                let _failed = jobs.update(job_id, |record| {
+                    record.state = JobState::Failed;
+                    record.expires_at_unix_ms = now_unix_ms()
+                        .max(record.created_at_unix_ms)
+                        .saturating_add(JOB_TTL_MS);
+                    record.error_code = Some("status_persistence_failed".to_owned());
+                });
+            }
         } else {
             let _cleanup = remove_if_exists(&artifact);
             let _failed = jobs.update(job_id, |record| {
                 record.state = JobState::Failed;
+                record.expires_at_unix_ms = now_unix_ms()
+                    .max(record.created_at_unix_ms)
+                    .saturating_add(JOB_TTL_MS);
                 record.error_code = Some("backup_failed".to_owned());
             });
         }
@@ -490,9 +559,10 @@ pub(super) async fn download_backup(
     if served.status() != StatusCode::OK {
         return Err(ApiError::not_found(request_id_value));
     }
-    let _updated = state
+    state
         .backup_jobs
-        .update(job_id, |record| record.downloaded = true);
+        .update(job_id, |record| record.download_started = true)
+        .map_err(|_| ApiError::unavailable(request_id_value))?;
     let (parts, body) = served.into_parts();
     let mut response = Response::from_parts(parts, Body::new(body));
     response.headers_mut().insert(
@@ -556,7 +626,7 @@ pub(super) async fn verify_uploaded_backup(
         .map_err(|_| ApiError::authentication(request_id_value))?
         .authorize_backup_inspect()
         .map_err(|error| map_vault_error(error, request_id_value))?;
-    let expensive_slot = Arc::clone(&state.password_slots)
+    let expensive_slot = Arc::clone(&state.archive_slots)
         .try_acquire_owned()
         .map_err(|_| ApiError::rate_limited(request_id_value))?;
 
@@ -779,7 +849,7 @@ fn status_response(job: BackupJobRecord) -> BackupStatusResponse {
         source_recovery_epoch: job.source_recovery_epoch,
         archive_bytes: job.archive_bytes,
         record_count: job.record_count,
-        downloaded: job.downloaded,
+        download_started: job.download_started,
         error_code: job.error_code,
     }
 }
@@ -810,6 +880,10 @@ mod tests {
         let registry = BackupJobRegistry::open(&directory)?;
         let job = registry.create(1_800_000_300_000)?;
         registry.update(job.job_id, |record| record.state = JobState::Running)?;
+        fs::write(
+            registry.artifact_path(job.job_id),
+            b"encrypted interrupted artifact",
+        )?;
         drop(registry);
         let orphan_archive = directory.join(".verify-test.smcvault");
         let orphan_status = directory.join(".status-test.tmp");
@@ -827,6 +901,7 @@ mod tests {
             .ok_or_else(|| std::io::Error::other("recovered job missing"))?;
         assert_eq!(recovered.state, JobState::Failed);
         assert_eq!(recovered.error_code.as_deref(), Some("interrupted"));
+        assert!(!reopened.artifact_path(job.job_id).exists());
         Ok(())
     }
 
@@ -839,6 +914,60 @@ mod tests {
         let linked = root.path().join("linked");
         symlink(&actual, &linked)?;
         assert!(BackupJobRegistry::open(&linked).is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn failed_status_publication_preserves_memory_and_removes_its_partial()
+    -> Result<(), std::io::Error> {
+        let root = TempDir::new()?;
+        let directory = root.path().join("jobs");
+        let registry = BackupJobRegistry::open(&directory)?;
+        let job = registry.create(1_800_000_300_000)?;
+        fs::remove_file(registry.status_path(job.job_id))?;
+        fs::create_dir(registry.status_path(job.job_id))?;
+
+        assert!(
+            registry
+                .update(job.job_id, |record| record.state = JobState::Running)
+                .is_err()
+        );
+        assert_eq!(
+            registry
+                .get(job.job_id)
+                .ok_or_else(|| std::io::Error::other("job missing"))?
+                .state,
+            JobState::Pending
+        );
+        assert!(fs::read_dir(&directory)?.all(|entry| {
+            entry
+                .ok()
+                .is_none_or(|entry| !entry.file_name().to_string_lossy().starts_with(".status-"))
+        }));
+        Ok(())
+    }
+
+    #[test]
+    fn running_jobs_do_not_expire_before_terminal_artifact_retention() -> Result<(), std::io::Error>
+    {
+        let root = TempDir::new()?;
+        let directory = root.path().join("jobs");
+        let registry = BackupJobRegistry::open(&directory)?;
+        let job = registry.create(1_800_000_300_000)?;
+        registry.update(job.job_id, |record| record.state = JobState::Running)?;
+        registry.cleanup_expired(job.expires_at_unix_ms + 1)?;
+        assert_eq!(
+            registry
+                .get(job.job_id)
+                .ok_or_else(|| std::io::Error::other("running job expired"))?
+                .state,
+            JobState::Running
+        );
+
+        registry.update(job.job_id, |record| record.state = JobState::Completed)?;
+        registry.cleanup_expired(job.expires_at_unix_ms + 1)?;
+        assert!(registry.get(job.job_id).is_none());
+        assert!(!registry.status_path(job.job_id).exists());
         Ok(())
     }
 }

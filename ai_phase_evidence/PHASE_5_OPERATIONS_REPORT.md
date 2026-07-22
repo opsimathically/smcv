@@ -47,6 +47,12 @@ page corruption readiness failure, WAL commit/recovery, busy-writer bounds,
 archive short-write cleanup, KDF/header bounds, password-slot saturation,
 process restart of interrupted jobs, and backward wall-clock audit sequencing.
 
+The 2026-07-22 ten-pass operational rerun additionally proves atomic
+status-before-memory advancement, cleanup of interrupted artifacts and status
+partials, non-expiry of running work, a single archive slot independent of four
+password slots, 256 MiB logical/KDF ceilings, a 32-live-session cap with expired
+row reclamation, and serialized five-second readiness caching off async workers.
+
 ## Release envelope
 
 With explicit dirty-envelope test flags, two consecutive builds produced the

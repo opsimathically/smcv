@@ -817,7 +817,7 @@ mod tests {
 
     use crate::{LocalSetupCapability, RequestPrincipal, initialize_vault};
 
-    use super::validate_password_phc;
+    use super::{SESSION_ABSOLUTE_MS, validate_password_phc};
 
     fn fixture() -> (TempDir, crate::InitializedVault) {
         let root = TempDir::new()
@@ -1009,5 +1009,39 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn active_session_count_is_bounded_and_expired_rows_are_reclaimed() {
+        let (_root, vault) = fixture();
+        let password = ProtectedString::new(String::from("synthetic long password"));
+        let enrolled_at = 1_800_000_001_000;
+        vault
+            .enroll_local_owner(
+                LocalSetupCapability::for_local_cli(),
+                &password,
+                RequestId::random(),
+                enrolled_at,
+            )
+            .unwrap_or_else(|error| panic!("synthetic owner must enroll: {error}"));
+        let first_login = enrolled_at + 1;
+        for offset in 0..32 {
+            vault
+                .login_with_password(&password, RequestId::random(), first_login + offset)
+                .unwrap_or_else(|error| panic!("bounded session must issue: {error}"));
+        }
+        assert!(
+            vault
+                .login_with_password(&password, RequestId::random(), first_login + 32)
+                .is_err(),
+            "a thirty-third live owner session must be rejected"
+        );
+        vault
+            .login_with_password(
+                &password,
+                RequestId::random(),
+                first_login + SESSION_ABSOLUTE_MS + 32,
+            )
+            .unwrap_or_else(|error| panic!("expired session rows must be reclaimed: {error}"));
     }
 }

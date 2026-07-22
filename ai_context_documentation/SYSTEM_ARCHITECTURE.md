@@ -90,12 +90,14 @@ bounded input types, but not convenience access that bypasses authorization.
 - Serves same-origin web assets and `/api/v1`.
 - Holds the unlocked vault KEK only while running and ready.
 - Uses one serialized SQLite connection in the supported single-process
-  topology, bounded HTTP concurrency, and four blocking password-hash slots.
-  Phase 5 completes general blocking-work isolation and production calibration.
+  topology, bounded HTTP concurrency, four blocking password-hash slots, and
+  one independent archive-work slot. Readiness integrity scans are serialized,
+  cached briefly, and isolated on the blocking pool.
 - Supports one active instance per SQLite vault in v1.
 - Gives long-running backup/restore jobs durable bounded state so a browser
   disconnect does not change completion semantics; encrypted download artifacts
-  have quotas and expiry.
+  have quotas and terminal-state expiry. Status advances in memory only after
+  its atomic durable publication succeeds.
 - Embeds a no-build semantic HTML/CSS/ES-module owner interface in the Rust
   binary. It loads no third-party runtime asset, uses no service worker or
   browser persistence, and treats `/api/v1` as the sole product authority

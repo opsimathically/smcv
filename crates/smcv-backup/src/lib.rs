@@ -35,7 +35,7 @@ pub const MAX_RECORDS: u64 = 10_000_000;
 /// Minimum Argon2 memory cost accepted for passphrase archives.
 pub const MIN_ARGON2_MEMORY_KIB: u32 = 64 * 1024;
 /// Maximum Argon2 memory cost accepted from an archive.
-pub const MAX_ARGON2_MEMORY_KIB: u32 = 1024 * 1024;
+pub const MAX_ARGON2_MEMORY_KIB: u32 = 256 * 1024;
 /// Maximum Argon2 iteration count accepted from an archive.
 pub const MAX_ARGON2_ITERATIONS: u32 = 10;
 /// Maximum Argon2 lanes accepted from an archive.

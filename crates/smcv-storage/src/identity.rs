@@ -7,6 +7,8 @@ use crate::{
     records::{insert_audit, require_audit_head},
 };
 
+const MAX_ACTIVE_SESSIONS_PER_PRINCIPAL: i64 = 32;
+
 /// Principal category with distinct authentication and authorization behavior.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum PrincipalKind {
@@ -412,6 +414,23 @@ impl SqliteStore {
         let connection = self.lock()?;
         let transaction = connection.unchecked_transaction()?;
         require_audit_head(&transaction, audit)?;
+        transaction.execute(
+            r"DELETE FROM smcv_sessions
+               WHERE revoked_at_unix_ms IS NOT NULL
+                  OR absolute_expires_at_unix_ms < ?1",
+            [session.created_at_unix_ms],
+        )?;
+        let active_sessions: i64 = transaction.query_row(
+            r"SELECT count(*) FROM smcv_sessions
+               WHERE principal_id = ?1
+                 AND revoked_at_unix_ms IS NULL
+                 AND absolute_expires_at_unix_ms >= ?2",
+            params![session.principal_id.as_bytes(), session.created_at_unix_ms],
+            |row| row.get(0),
+        )?;
+        if active_sessions >= MAX_ACTIVE_SESSIONS_PER_PRINCIPAL {
+            return Err(StorageError::StateConflict);
+        }
         transaction.execute(
             r"INSERT INTO smcv_sessions (
                    session_id, lookup_id, verifier, csrf_verifier, principal_id,

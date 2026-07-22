@@ -162,3 +162,26 @@ revocation, embedded asset trust checks, Firefox/Chromium DOM lifecycle,
 keyboard/names/reflow/reduced-motion/forced-colors checks, a live Orca run,
 focused server and CLI suites, and strict all-feature Clippy. No Pass 7
 critical/high finding remains open.
+
+## Pass 8 — operations, deployment, observability, and resource exhaustion
+
+Perspective: a response-loss/crash adversary, an authenticated resource
+exhauster, a scrape storm from another local account, a clock jump, and an
+operator relying on durable job/custody language. Result: **seven findings
+repaired and retested**.
+
+| ID | Severity | Finding | Repair and verification |
+|---|---|---|---|
+| A10-R8-001 | High | Backup status mutation happened directly in memory before its temporary JSON was synced and renamed. A publication failure therefore returned an error while the process still exposed the uncommitted state; successful archive creation also ignored completion-status failure and could leave an untracked final artifact. | Updates now build a cloned candidate, durably publish it, and only then replace memory. Every status temporary has a drop cleanup, and completion-publication failure removes the archive and records a safe terminal failure when possible. An obstructed final status path proves the in-memory state remains unchanged and no partial survives. |
+| A10-R8-002 | High | Fixed creation-time expiry removed pending/running records and files while their detached worker could still be producing an archive. Cleanup also removed the in-memory record before filesystem deletion, preventing retry after a deletion failure; restart marked work interrupted without removing a possibly published artifact. | Only terminal jobs expire, their retention window is reset on completion/failure, and file deletion succeeds before memory removal. Restart converts interrupted work to a durably failed state, refreshes its terminal expiry, and removes its artifact. Regression coverage exercises running work beyond its provisional timestamp and restart cleanup. |
+| A10-R8-003 | High | Four archive jobs shared the password semaphore. Each could accept a 1 GiB logical stream and an attacker-selected 1 GiB Argon2 memory setting, multiplying memory pressure while also denying every owner password login. | Archive work now has one independent slot. Runtime logical-stream and passphrase-KDF memory ceilings are each 256 MiB; the committed fixture and representative multi-frame archives still pass. Password capacity remains four and cannot be consumed by an archive upload. |
+| A10-R8-004 | Medium | Every readiness and metrics request synchronously ran SQLite `PRAGMA quick_check` on an async request thread. Any local process could generate overlapping loopback scrapes, block the shared database, and occupy unbounded operational-listener tasks. | Readiness scans move to the blocking pool, serialize behind one slot, and cache their status for five seconds. The independently loopback-only operational router now has a 16-request concurrency cap. Startup still performs its own immediate integrity check. |
+| A10-R8-005 | Medium | Successful logins created durable session rows without a live-session ceiling or expired/revoked-row reclamation. A valid owner credential or automated client could grow this host-bound table indefinitely. | Session creation atomically deletes expired/revoked ephemeral rows and rejects a thirty-third live session for one principal. A regression creates 32 sessions, rejects the next, advances past absolute expiry, and proves login/reclamation resumes. Audit history remains durable while session tokens remain excluded from portable backup. |
+| A10-R8-006 | Medium | The server set and displayed `downloaded` as soon as it constructed an HTTP body, before the client consumed even one byte. This could be mistaken for completed transfer despite the custody warning. | Durable/API/UI language now records only `download_started` (with a legacy on-disk alias). It explicitly states that transport completion and off-host custody remain unproven. |
+| A10-R8-007 | Medium | Startup accepted status JSON through non-regular paths, did not bind the filename to the embedded job ID, and could load more records than the runtime quota. | Startup requires a bounded regular status file, exact `<job-id>.json` identity, coherent timestamps, and at most 32 unexpired jobs. Expired terminal state is removed and interrupted state is normalized before entering the in-memory registry. |
+
+Validation includes job-publication obstruction, interrupted restart cleanup,
+running/terminal expiry, active-session saturation and reclamation, hostile KDF
+bounds, committed archive compatibility, readiness/metrics response checks,
+the complete server/backup suites, and strict workspace all-feature Clippy. No
+Pass 8 critical/high finding remains open.

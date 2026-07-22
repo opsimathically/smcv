@@ -341,7 +341,7 @@ fn validate_existing_file(_path: &Path) -> Result<(), PreflightError> {
 }
 
 pub(crate) async fn metrics(State(state): State<ApiState>) -> Response {
-    let ready = state.vault().store.quick_integrity_check().unwrap_or(false);
+    let ready = state.is_ready().await;
     let metrics = &state.metrics;
     let body = format!(
         concat!(

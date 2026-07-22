@@ -105,7 +105,7 @@ libsodium/PyNaCl, not merely round-tripped through the Rust implementation.
 
 Argon2id is the only initial password/passphrase KDF. Stored parameters are
 allowlisted and bounded before work begins. The Phase 0 archive reader accepts
-64 MiB through 1 GiB, one through ten iterations, and one through four lanes.
+64 MiB through 256 MiB, one through ten iterations, and one through four lanes.
 Archive creation begins with 64 MiB, three iterations, and one lane; Phase 2
 calibrates human password defaults on the minimum supported host without
 raising the compiled import ceiling. All expensive work uses a bounded worker

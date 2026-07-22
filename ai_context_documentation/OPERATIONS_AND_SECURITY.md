@@ -125,7 +125,10 @@ signal catalog includes:
 
 Liveness means the process loop responds. Readiness additionally requires an
 unlocked valid key provider, compatible schema, usable database, and ability to
-write required audit state.
+write required audit state. The database integrity scan is serialized on a
+blocking worker and reused for five seconds; the loopback operational listener
+is capped at 16 concurrent requests so a scrape burst cannot occupy async
+runtime threads with repeated scans.
 
 ## Backup operations
 
@@ -138,8 +141,12 @@ write required audit state.
   becomes visible.
 - Retention never deletes the final known-good verified copy.
 - Server-generated encrypted download artifacts use opaque names, quotas,
-  restrictive permissions, and short expiry; their presence is not described as
-  off-host owner custody.
+  restrictive permissions, and short terminal-state expiry; running jobs are
+  never expired underneath their workers. Their presence or an initiated HTTP
+  response is not described as completed transfer or off-host owner custody.
+- Archive creation and verification share one slot independent from the four
+  password slots. Accepted logical plaintext and attacker-selected Argon2
+  memory parameters are each capped at 256 MiB.
 - Failed restore staging directories and orphaned destination key material are
   recognized by explicit non-ready state and cleaned only after target identity
   validation.
