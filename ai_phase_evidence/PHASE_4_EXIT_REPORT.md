@@ -24,10 +24,10 @@ fresh-host browser recovery channel.
 | Requirements / criterion | Evidence and result |
 |---|---|
 | WEB-001 | All committed owner workflows are available in the semantic responsive shell, including empty, loading, denial, conflict, archive/delete/purge, and recovery states. |
-| WEB-002 | Reveal is explicit; the browser test proves the synthetic value absent before reveal and after hide/navigation. Visibility loss clears revealed state; browser persistence stays empty. |
+| WEB-002 | Reveal is explicit; the browser test proves the synthetic value absent before reveal and after hide/navigation. Visibility loss and a one-minute maximum timer clear revealed state; browser persistence stays empty. |
 | WEB-003 | Existing recent-owner API enforcement protects high-risk actions. The UI states purge, credential, backup custody, rollback, and passkey consequences before action. |
 | WEB-004 | The [accessibility report](PHASE_4_ACCESSIBILITY_REPORT.md), machine-readable Firefox results, and screenshots cover keyboard, names, focus, 320 px capture, 2x scale, forced colors, reduced motion, and responsive layouts. |
-| WEB-005 | Embedded asset tests reject remote runtime dependencies and inline script; production documents use a restrictive same-origin CSP and private/no-store policies. |
+| WEB-005 | Embedded asset tests reject remote runtime dependencies and inline script; production documents use a restrictive same-origin CSP, private/no-store policies, frame/capability denial, opener/resource isolation, and HSTS. |
 | BACKUP-001 / BACKUP-006 | The owner can create, list, download, delete, and upload a portable archive. Browser upload runs full authenticated verification and an actual clean temporary restore test. |
 | BACKUP-007–015 | The local CLI recovery browser requires a clean destination, separate one-time body code, exact loopback origin, digest-only state, short expiry, and single activation. It displays logical-vault/epoch/credential/passkey effects and supports preserve/revoke credential modes. |
 | AUDIT-001–004 | Activity renders safe actor/action/resource/result records; lifecycle, authorization, backup, and recovery coverage remains enforced by the lower-layer tests. No raw protected values enter UI event text. |
@@ -51,6 +51,10 @@ node scripts/browser-smoke.mjs
 SMCV_SCREEN_READER=1 node scripts/browser-smoke.mjs
   PASS: the same flow with Orca active; see the documented debug-output limit
 ```
+
+The two browser modes publish separate reports without deleting one another's
+evidence. A 2026-07-22 adversarial rerun also verified reload-triggered server
+session revocation and ambiguity-safe create retries.
 
 Focused Rust evidence includes:
 

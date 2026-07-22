@@ -142,3 +142,23 @@ and second restore, injected post-staging/audit failures, exact PHC work-factor
 bounds, snapshot publication, artifact-custody symlink rejection, strict
 all-feature Clippy, and focused application/storage/server suites. No Pass 6
 critical/high finding remains open.
+
+## Pass 7 — HTTP, browser UI, accessibility, and client trust
+
+Perspective: a cross-origin web attacker, a user reloading or losing a response
+mid-mutation, a shoulder-surfer, an untrusted opened window, and an operator
+rerunning release evidence. Result: **five findings repaired and retested**.
+
+| ID | Severity | Finding | Repair and verification |
+|---|---|---|---|
+| A10-R7-001 | High | The CSRF value is deliberately display-once, so a page reload could still hold a valid server cookie but could not call the CSRF-protected logout route. The UI nevertheless described its local rendering reset as a lock, leaving an orphan session usable until expiry. | Logout is now a narrow CSRF exception requiring the valid cookie and a custom non-simple lock header that cross-origin forms cannot send while CORS remains disabled. Initialization detects and revokes a reloaded session, and lock text claims server revocation only after success. A route regression proves missing-header rejection, cookie-only revocation with the header, cookie clearing, and subsequent session rejection. |
+| A10-R7-002 | High | Client errors always claimed that no change was committed, including timeouts, network loss, and server errors. Retrying namespace or secret creation then generated a new idempotency key, allowing an already-committed mutation whose response was lost to be duplicated. | Only definitive 4xx responses receive a not-committed statement. Ambiguous failures require current-state reload; create forms retain their key across those failures and rotate it only after definitive rejection. Backup and secret-update flows no longer offer an immediate ambiguous retry. Static asset tests guard the create-key pattern. |
+| A10-R7-003 | Medium | Revealed plaintext remained rendered indefinitely while the page stayed visible unless the user manually hid it or navigated away. | Every reveal now has a one-minute maximum DOM lifetime. The reusable clear boundary activates each sensitive hide control before replacing content, while navigation, visibility loss, and explicit lock retain immediate clearing. Browser evidence again proves absence before reveal and after hide/navigation. |
+| A10-R7-004 | Medium | Main and recovery browser responses relied principally on CSP and no-store but omitted complementary browser isolation/capability headers; the main production response also omitted an application-owned HSTS assertion. | Main documents now deny framing and unused capabilities, isolate opener/resource contexts, and emit one-year HSTS. The loopback HTTP recovery document receives the applicable non-HSTS protections. Exact response-header regressions cover both routers. |
+| A10-R7-005 | Medium | The ordinary browser smoke campaign recursively deleted its evidence directory, erasing the independently collected screen-reader report whenever validations ran in the documented order. | Each campaign now replaces only its own JSON report. A fresh normal run followed by a fresh Orca/Firefox run leaves both machine-readable reports and the synthetic screenshot set present. |
+
+Validation includes main/recovery response-header assertions, reload-session
+revocation, embedded asset trust checks, Firefox/Chromium DOM lifecycle,
+keyboard/names/reflow/reduced-motion/forced-colors checks, a live Orca run,
+focused server and CLI suites, and strict all-feature Clippy. No Pass 7
+critical/high finding remains open.

@@ -30,15 +30,21 @@ function element(tag, attributes = {}, children = []) {
 }
 
 function clear(node) {
+  for (const control of node.querySelectorAll("[data-clear-sensitive]")) control.click();
   node.replaceChildren();
 }
 
 function formatError(error, action) {
-  if (error instanceof ApiFailure) {
+  if (error instanceof ApiFailure && error.status >= 400 && error.status < 500) {
     const request = error.requestId ? ` Request ID: ${error.requestId}` : "";
     return `${action} No change was committed. ${error.message}${request}`;
   }
-  return `${action} No change was committed. Check the connection and try again.`;
+  const request = error instanceof ApiFailure && error.requestId ? ` Request ID: ${error.requestId}` : "";
+  return `${action} SMCV could not confirm the final state. Reload current state before retrying any change.${request}`;
+}
+
+function outcomeKnownNotCommitted(error) {
+  return error instanceof ApiFailure && error.status >= 400 && error.status < 500;
 }
 
 function announce(message) {
@@ -257,6 +263,7 @@ async function renderNamespaceCreate(namespaces) {
     ...namespaces.map(namespaceOption),
   ]);
   const error = formError();
+  let idempotencyKey = crypto.randomUUID();
   const form = element("form", { className: "card stack", novalidate: "" }, [
     element("h2", { text: "Namespace details" }),
     formField("Name", name, "Names are protected metadata and are never used as URLs."),
@@ -276,7 +283,7 @@ async function renderNamespaceCreate(namespaces) {
     try {
       await api.request("/namespaces", {
         method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Idempotency-Key": idempotencyKey },
         body: {
           parent_namespace_id: parent.value || null,
           metadata: { name: name.value, description: description.value || null, username: null, tags: [] },
@@ -286,6 +293,7 @@ async function renderNamespaceCreate(namespaces) {
       await renderSecrets();
     } catch (requestError) {
       showFormError(error, requestError, "SMCV could not create this namespace.");
+      if (outcomeKnownNotCommitted(requestError)) idempotencyKey = crypto.randomUUID();
       submit.disabled = false;
     }
   });
@@ -305,6 +313,7 @@ async function renderSecretCreate(namespaces, preferredNamespace = null) {
   const description = element("textarea", { id: "secret-description", name: "description", maxlength: "4096" });
   const value = element("textarea", { id: "secret-value", name: "value", required: "", maxlength: "1048576", autocomplete: "off", spellcheck: "false" });
   const error = formError();
+  let idempotencyKey = crypto.randomUUID();
   const form = element("form", { className: "card stack", novalidate: "" }, [
     element("h2", { text: "Secret details" }),
     formField("Namespace", namespace, "Existing namespace policies may grant applications access to this new secret."),
@@ -328,7 +337,7 @@ async function renderSecretCreate(namespaces, preferredNamespace = null) {
     try {
       const created = await api.request("/secrets", {
         method: "POST",
-        headers: { "Idempotency-Key": crypto.randomUUID() },
+        headers: { "Idempotency-Key": idempotencyKey },
         body: {
           namespace_id: namespace.value,
           metadata: {
@@ -352,6 +361,7 @@ async function renderSecretCreate(namespaces, preferredNamespace = null) {
       }, namespaces);
     } catch (requestError) {
       showFormError(error, requestError, "SMCV could not create this secret.");
+      if (outcomeKnownNotCommitted(requestError)) idempotencyKey = crypto.randomUUID();
       submit.disabled = false;
       value.focus();
     }
@@ -374,9 +384,11 @@ async function revealInto(secretId, version, container, button) {
     if (mask) mask.hidden = true;
     const value = element("code", { className: "secret-value", "data-revealed-secret": "", text: decoded.value });
     const encoding = element("span", { className: "badge warning", text: `Revealed · ${decoded.encoding}` });
-    const hide = element("button", { className: "button secondary", type: "button", text: "Hide value" });
+    const hide = element("button", { className: "button secondary", type: "button", text: "Hide value", "data-clear-sensitive": "" });
     const copy = element("button", { className: "button secondary", type: "button", text: "Copy value" });
+    const exposureTimer = window.setTimeout(() => hide.click(), 60_000);
     hide.addEventListener("click", () => {
+      window.clearTimeout(exposureTimer);
       value.remove();
       encoding.remove();
       hide.remove();
@@ -398,7 +410,7 @@ async function revealInto(secretId, version, container, button) {
     });
     button.hidden = true;
     container.append(encoding, value, element("div", { className: "page-actions" }, [hide, copy]));
-    announce("Secret value revealed. It has not been read aloud automatically.");
+    announce("Secret value revealed for up to one minute. It has not been read aloud automatically.");
     hide.focus();
   } catch (error) {
     button.disabled = false;
@@ -443,7 +455,7 @@ async function renderSecretUpdate(secret, namespaces) {
       await renderSecretDetail({ ...secret, current_version: updated.version, revision: secret.revision + 1 }, namespaces);
     } catch (requestError) {
       showFormError(error, requestError, "SMCV could not create the new version. The secret input was cleared; reload the record before retrying if another update changed it.");
-      submit.textContent = "Save not committed";
+      submit.textContent = "Reload before retrying";
       form.querySelector(".page-actions").prepend(element("button", { className: "button primary", type: "button", text: "Reload secret list", onclick: renderSecrets }));
     }
   });
@@ -1355,8 +1367,12 @@ async function renderBackupCreate() {
       }
     } catch (requestError) {
       showFormError(error, requestError, "SMCV could not start this backup.");
-      submit.disabled = false;
-      submit.textContent = "Create and verify backup";
+      if (outcomeKnownNotCommitted(requestError)) {
+        submit.disabled = false;
+        submit.textContent = "Create and verify backup";
+      } else {
+        submit.textContent = "Reload backup status before retrying";
+      }
     }
   });
   page.append(pageHeader("Portable recovery", "Create backup", "Created, verified, downloaded, and restore-tested are distinct states."), form);
@@ -1751,10 +1767,10 @@ document.querySelector("#passkey-login").addEventListener("click", async (event)
 document.querySelector("#logout").addEventListener("click", async () => {
   try {
     await api.logout();
+    showLogin("The local and server-side session are locked. Authenticate again to continue.");
   } catch (_error) {
-    // Local plaintext is removed even if the server cannot confirm logout.
+    showLogin("Local sensitive content was removed, but SMCV could not confirm server-side session revocation. Close this browser and retry locking when the service is available.");
   }
-  showLogin("The local session is locked. Authenticate again to continue.");
 });
 
 navToggle.addEventListener("click", () => {
@@ -1788,9 +1804,8 @@ document.addEventListener("visibilitychange", () => {
 async function initialize() {
   try {
     await api.session();
-    // CSRF material is display-once at login; a reload intentionally requires
-    // reauthentication before any state-changing browser request.
-    showLogin("Your session exists, but this page was reloaded. Authenticate again to restore mutation protection.");
+    await api.logout();
+    showLogin("The page was reloaded, so SMCV revoked the previous server-side session. Authenticate again to continue.");
   } catch (_error) {
     showLogin();
   }

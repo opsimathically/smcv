@@ -117,8 +117,14 @@ const database = path.join(dataDirectory, "vault.sqlite");
 const rootKey = path.join(keyDirectory, "root.key");
 
 try {
-  if (!screenReaderMode) await rm(evidenceDirectory, { recursive: true, force: true });
   await mkdir(evidenceDirectory, { recursive: true });
+  // Browser and screen-reader runs own separate reports. Never remove the
+  // whole evidence directory here: doing so makes a routine browser run erase
+  // the independently collected screen-reader evidence.
+  await rm(
+    path.join(evidenceDirectory, screenReaderMode ? "screen-reader-smoke.json" : "browser-smoke.json"),
+    { force: true },
+  );
   await completed("cargo", ["build", "--workspace"]);
   await completed(path.join(repository, "target/debug/smcv-cli"), ["init", "--database", database, "--root-key", rootKey]);
   const passwordFile = path.join(temporary, "synthetic-password-input");

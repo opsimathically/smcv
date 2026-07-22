@@ -1,6 +1,6 @@
 # Phase 4 accessibility report
 
-Date: 2026-07-21
+Date: 2026-07-22
 Scope: supported owner web workflows and local fresh-host recovery UI
 Result: **Passed with one explicitly bounded assistive-technology tooling limit**
 
@@ -17,7 +17,9 @@ Both commands create isolated synthetic vaults and exercise login, navigation,
 namespace and secret creation, masked/revealed/hidden secret handling, and the
 backup/recovery page. The committed machine-readable results are
 [browser-smoke.json](phase_4_browser/browser-smoke.json) and
-[screen-reader-smoke.json](phase_4_browser/screen-reader-smoke.json).
+[screen-reader-smoke.json](phase_4_browser/screen-reader-smoke.json). Each mode
+replaces only its own report, so rerunning one campaign preserves the other's
+independent evidence.
 
 | Check | Result |
 |---|---|

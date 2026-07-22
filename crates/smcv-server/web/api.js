@@ -90,6 +90,9 @@ export class ApiClient {
   }
 
   logout() {
-    return this.request("/session", { method: "DELETE" });
+    return this.request("/session", {
+      method: "DELETE",
+      headers: { "X-SMCV-Session-Lock": "1" },
+    });
   }
 }

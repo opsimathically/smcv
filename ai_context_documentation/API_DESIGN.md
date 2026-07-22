@@ -1,7 +1,7 @@
 # API design
 
 Status: **Committed Phase 2 API, Phase 3 backup jobs, and Phase 4 browser adapters**
-Last reviewed: 2026-07-21
+Last reviewed: 2026-07-22
 
 ## General contract
 
@@ -104,6 +104,10 @@ codes.
   header, bound to principal and request digest.
 - Reusing a key for different input is rejected.
 - Idempotency keys are bounded and stored/logged only as verifiers.
+- A browser create form keeps the same key after a transport or server failure
+  whose commit outcome is unknown. It rotates the key only after a definitive
+  client rejection. The UI requires a state reload before retrying any other
+  mutation with an ambiguous outcome.
 - Reads are safe to retry; high-risk streaming operations state whether retry
   creates a new audit event.
 
@@ -155,6 +159,10 @@ cleared and never trusted.
 - Session cookies use the `__Host-` prefix, `Secure`, `HttpOnly`, `Path=/`, and
   `SameSite=Strict` in production.
 - State-changing browser requests require a CSRF token bound to the session.
+- Session lock/logout is the narrow exception needed to revoke a cookie after
+  page reload has discarded the display-once CSRF value. It requires the
+  session cookie plus the non-simple `X-SMCV-Session-Lock: 1` header; ordinary
+  cross-origin form requests cannot supply that header, and CORS remains off.
 - CORS is disabled by default; an allowlist is not a substitute for CSRF.
 - Session IDs rotate after login and privilege/recent-auth changes.
 - Session, authenticator, credential, and ceremony timestamps fail closed when
@@ -163,6 +171,8 @@ cleared and never trusted.
   verification, preventing concurrent assertions or revocation from being
   overwritten by stale successful-login state.
 - Logout invalidates server state and clears site data where safe.
+- Browser documents deny framing and unnecessary device capabilities, isolate
+  opener/resource contexts, and emit HSTS for the production HTTPS boundary.
 - Sensitive content is not placed in URLs, browser storage, service-worker
   caches, or referrer-bearing navigation.
 

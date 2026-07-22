@@ -502,7 +502,14 @@ async fn session_status(
 async fn logout(State(state): State<ApiState>, headers: HeaderMap) -> Result<Response, ApiError> {
     let now = now_unix_ms();
     let request_id = request_id(&headers);
-    let owner = authenticate_owner(&state, &headers, true, now)?;
+    if headers
+        .get("x-smcv-session-lock")
+        .and_then(|value| value.to_str().ok())
+        != Some("1")
+    {
+        return Err(ApiError::authentication(request_id));
+    }
+    let owner = authenticate_owner(&state, &headers, false, now)?;
     state
         .vault
         .logout_browser_session(owner, request_id, now)
@@ -2200,6 +2207,23 @@ fn apply_security_headers(headers: &mut HeaderMap) {
         );
     }
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
+    headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
+    );
+    headers.insert(
+        "cross-origin-opener-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        header::STRICT_TRANSPORT_SECURITY,
+        HeaderValue::from_static("max-age=31536000"),
+    );
 }
 
 #[derive(Serialize)]
@@ -2440,6 +2464,27 @@ mod tests {
         assert!(policy.contains("script-src 'self'"));
         assert!(policy.contains("connect-src 'self'"));
         assert!(policy.contains("frame-ancestors 'none'"));
+        assert_eq!(
+            response
+                .headers()
+                .get("permissions-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("cross-origin-opener-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("same-origin")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("strict-transport-security")
+                .and_then(|value| value.to_str().ok()),
+            Some("max-age=31536000")
+        );
         let body = to_bytes(response.into_body(), 128 * 1024)
             .await
             .unwrap_or_else(|error| panic!("web body must read: {error}"));
@@ -2504,6 +2549,63 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("synthetic response body must read: {error}"));
         assert!(!String::from_utf8_lossy(&body).contains("synthetic long password"));
+    }
+
+    #[tokio::test]
+    async fn custom_header_lock_revokes_a_reloaded_session_without_csrf() {
+        let (_root, state) = state();
+        enroll_local_owner(
+            &state,
+            ProtectedString::new(String::from("synthetic long password")),
+        )
+        .unwrap_or_else(|error| panic!("synthetic owner must enroll: {error}"));
+        let (cookie, _csrf) = login_owner(&state).await;
+
+        let missing_header = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/session")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("lock request must build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("lock request must respond: {error}"));
+        assert_eq!(missing_header.status(), StatusCode::UNAUTHORIZED);
+
+        let locked = router(state.clone())
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri("/api/v1/session")
+                    .header("cookie", &cookie)
+                    .header("x-smcv-session-lock", "1")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("lock request must build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("lock request must respond: {error}"));
+        assert_eq!(locked.status(), StatusCode::NO_CONTENT);
+        assert!(
+            locked
+                .headers()
+                .get("set-cookie")
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.contains("Max-Age=0"))
+        );
+
+        let rejected = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/session")
+                    .header("cookie", cookie)
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("status request must build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("status request must respond: {error}"));
+        assert_eq!(rejected.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

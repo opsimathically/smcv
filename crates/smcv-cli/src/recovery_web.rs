@@ -257,6 +257,18 @@ async fn security_headers(request: Request<axum::body::Body>, next: Next) -> Res
         HeaderValue::from_static("nosniff"),
     );
     headers.insert("x-frame-options", HeaderValue::from_static("DENY"));
+    headers.insert(
+        "permissions-policy",
+        HeaderValue::from_static("camera=(), microphone=(), geolocation=(), payment=(), usb=()"),
+    );
+    headers.insert(
+        "cross-origin-opener-policy",
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        "cross-origin-resource-policy",
+        HeaderValue::from_static("same-origin"),
+    );
     response
 }
 
@@ -728,7 +740,10 @@ async fn activate_restore(
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, sync::Arc};
+    use std::{
+        fs,
+        sync::{Arc, Mutex, atomic::AtomicBool},
+    };
 
     use axum::{
         body::{Body, to_bytes},
@@ -738,6 +753,7 @@ mod tests {
     use smcv_backup::RecoveryKey;
     use smcv_core::{ProtectedString, RequestId};
     use tempfile::TempDir;
+    use tokio::sync::Notify;
     use tower::ServiceExt as _;
 
     use super::{INDEX, RecoveryState, SCRIPT, STYLES, digest, now_unix_ms, recovery_router};
@@ -755,6 +771,55 @@ mod tests {
         assert!(!SCRIPT.contains("innerHTML"));
         assert!(!SCRIPT.contains("location.hash"));
         assert!(!SCRIPT.contains("history."));
+    }
+
+    #[tokio::test]
+    async fn recovery_document_has_isolation_and_capability_headers() {
+        let root = TempDir::new().unwrap_or_else(|error| panic!("temporary root: {error}"));
+        let state = Arc::new(RecoveryState {
+            claim_digest: digest(b"synthetic-claim"),
+            session_digest: Mutex::new(None),
+            origin: "http://127.0.0.1:12345".to_owned(),
+            expires_at_unix_ms: now_unix_ms().saturating_add(60_000),
+            database_path: root.path().join("data/vault.sqlite"),
+            root_key_path: root.path().join("provider/root.key"),
+            workspace: root.path().join("workspace"),
+            claimed: AtomicBool::new(false),
+            reserved: AtomicBool::new(false),
+            consumed: AtomicBool::new(false),
+            pending: Mutex::new(None),
+            shutdown: Notify::new(),
+        });
+        let response = recovery_router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("recovery request must build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("recovery request must respond: {error}"));
+        assert_eq!(
+            response
+                .headers()
+                .get("permissions-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("camera=(), microphone=(), geolocation=(), payment=(), usb=()")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("cross-origin-opener-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("same-origin")
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("cross-origin-resource-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("same-origin")
+        );
     }
 
     #[tokio::test]

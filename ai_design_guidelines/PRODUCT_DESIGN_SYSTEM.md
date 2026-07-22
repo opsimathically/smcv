@@ -82,7 +82,8 @@ an icon whose meaning remains clear without color.
   notice.
 - Copy provides a non-intrusive confirmation but never promises clipboard
   erasure; optional clearing is described as best effort.
-- Page navigation, timeout, and session lock remove rendered plaintext.
+- Page navigation, loss of visibility, session lock, and a one-minute maximum
+  reveal timer remove rendered plaintext.
 
 ### Effective-access summary
 
@@ -135,6 +136,9 @@ Every interactive surface designs and tests:
 - Skeletons never mimic actual secret lengths.
 - Errors preserve entered non-secret form data but clear secret fields.
 - Retry does not silently duplicate a mutation.
+- A network or server failure never claims that a mutation was not committed.
+  Preserve a create request's idempotency key and require a current-state
+  reload before retrying when the final outcome is unknown.
 - Long operations show bounded progress, current safe stage, cancellation
   semantics, and what happens if the browser closes.
 

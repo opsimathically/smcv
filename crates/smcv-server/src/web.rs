@@ -57,5 +57,8 @@ mod tests {
         assert!(!APP.contains("localStorage"));
         assert!(!APP.contains("sessionStorage"));
         assert!(!APP.contains("innerHTML"));
+        assert!(!APP.contains("\"Idempotency-Key\": crypto.randomUUID()"));
+        assert!(APP.contains("data-clear-sensitive"));
+        assert!(API.contains("X-SMCV-Session-Lock"));
     }
 }
