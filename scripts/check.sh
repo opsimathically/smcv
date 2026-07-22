@@ -2,12 +2,30 @@
 set -eu
 
 cargo fmt --all --check
-cargo clippy --workspace --all-targets --all-features -- -D warnings
-cargo test --workspace --all-features
-RUSTDOCFLAGS="-D warnings" cargo doc --workspace --all-features --no-deps
+cargo clippy --locked --workspace --all-targets --all-features -- -D warnings
+cargo test --locked --workspace --all-features
+RUSTDOCFLAGS="-D warnings" cargo doc --locked --workspace --all-features --no-deps
 cargo audit
 cargo deny check
 sh -n scripts/*.sh
+
+if ! grep -Fq 'runs-on: ubuntu-24.04' .github/workflows/ci.yml; then
+  echo "CI runner baseline is not pinned to Ubuntu 24.04" >&2
+  exit 1
+fi
+if ! awk '
+  /uses:/ {
+    if ($0 !~ /@[0-9a-f]{40}([[:space:]]|$)/) bad=1
+  }
+  END { exit bad }
+' .github/workflows/*.yml; then
+  echo "GitHub Actions dependencies must use full commit pins" >&2
+  exit 1
+fi
+if ! grep -Fq 'tool: cargo-audit@0.22.2,cargo-cyclonedx@0.5.9,cargo-deny@0.20.2' .github/workflows/ci.yml; then
+  echo "CI verification tools are not exactly version-pinned" >&2
+  exit 1
+fi
 
 token_prefix='smcv_v1\.'
 secret_pattern="-----BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY-----|AKIA[0-9A-Z]{16}|${token_prefix}[A-Za-z0-9_-]{16}\.[A-Za-z0-9_-]{43}"

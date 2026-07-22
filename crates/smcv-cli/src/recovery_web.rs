@@ -30,7 +30,7 @@ use zeroize::{Zeroize, Zeroizing};
 
 const CHANNEL_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
-const MAX_BODY_BYTES: usize = 8 * 1024 * 1024 * 1024;
+const MAX_BODY_BYTES: usize = 8 * 1024 * 1024 * 1024 + 1024 * 1024;
 const MAX_KEY_BYTES: usize = 4 * 1024;
 
 const INDEX: &str = include_str!("../recovery_web/index.html");

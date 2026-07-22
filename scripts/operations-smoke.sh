@@ -28,7 +28,23 @@ drills="$temporary/drills"
 logs="$temporary/server.log"
 
 cd "$repository"
-cargo build --workspace >/dev/null
+nginx_example=packaging/nginx-smcv.conf.example
+for required in \
+  'client_max_body_size 8193m;' \
+  'proxy_request_buffering off;' \
+  'proxy_buffering off;' \
+  'proxy_max_temp_file_size 0;' \
+  'proxy_read_timeout 930s;' \
+  'proxy_set_header X-Forwarded-For "";' \
+  'proxy_set_header X-Real-IP "";' \
+  'proxy_set_header Forwarded "";'
+do
+  grep -Fq "$required" "$nginx_example" || {
+    echo "nginx security/streaming boundary is missing: $required" >&2
+    exit 1
+  }
+done
+cargo build --locked --workspace >/dev/null
 target/debug/smcv-cli init --database "$database" --root-key "$root_key" >/dev/null
 printf '%s\n' 'synthetic operations owner password' > "$password_input"
 chmod 0600 "$password_input"

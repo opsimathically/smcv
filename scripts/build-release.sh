@@ -9,6 +9,12 @@ required_target=x86_64-unknown-linux-gnu
   echo "v1 release construction supports only $required_target (found $target)" >&2
   exit 1
 }
+glibc_version=$(getconf GNU_LIBC_VERSION)
+[ "$glibc_version" = "glibc 2.39" ] || {
+  echo "v1 release construction requires the glibc 2.39 baseline (found $glibc_version)" >&2
+  exit 1
+}
+openssl_version=$(openssl version)
 commit=$(git -C "$repository" rev-parse HEAD)
 working_tree_dirty=false
 if [ -n "$(git -C "$repository" status --porcelain --untracked-files=normal)" ]; then
@@ -48,6 +54,10 @@ cp -R ai_context_documentation ai_design_guidelines ai_phase_evidence ai_phased_
 cp -R packaging/. "$stage/packaging/"
 cp scripts/build-release.sh scripts/release-candidate-smoke.sh scripts/verify-release.sh "$stage/scripts/"
 cargo cyclonedx --quiet --manifest-path Cargo.toml --format json --all --override-filename smcv-release
+[ "$(sha256sum "$repository/Cargo.lock" | awk '{print $1}')" = "$cargo_lock_sha256" ] || {
+  echo "SBOM generation changed the locked dependency graph" >&2
+  exit 1
+}
 for crate in smcv-app smcv-backup smcv-cli smcv-core smcv-crypto smcv-server smcv-storage; do
   cp "crates/$crate/smcv-release.json" "$stage/sbom/$crate.cdx.json"
   jq --arg timestamp "$source_timestamp" 'del(.serialNumber) | .metadata.timestamp = $timestamp' \
@@ -63,10 +73,12 @@ jq -n \
   --arg rustc_version "$rustc_version" \
   --arg cargo_version "$cargo_version" \
   --arg cyclonedx_version "$cyclonedx_version" \
+  --arg glibc_version "$glibc_version" \
+  --arg openssl_version "$openssl_version" \
   --arg cargo_lock_sha256 "$cargo_lock_sha256" \
   --argjson source_date_epoch "$source_epoch" \
   --argjson working_tree_dirty "$working_tree_dirty" \
-  '{schema:$schema,version:$version,target:$target,commit:$commit,source_date_epoch:$source_date_epoch,builder:"local-cargo-locked",rustc_version:$rustc_version,cargo_version:$cargo_version,cyclonedx_version:$cyclonedx_version,cargo_lock_sha256:$cargo_lock_sha256,working_tree_dirty:$working_tree_dirty,external_signing:false}' \
+  '{schema:$schema,version:$version,target:$target,commit:$commit,source_date_epoch:$source_date_epoch,builder:"local-cargo-locked",rustc_version:$rustc_version,cargo_version:$cargo_version,cyclonedx_version:$cyclonedx_version,glibc_version:$glibc_version,openssl_version:$openssl_version,cargo_lock_sha256:$cargo_lock_sha256,working_tree_dirty:$working_tree_dirty,external_signing:false}' \
   > "$stage/PROVENANCE.json"
 
 (

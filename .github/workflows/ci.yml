@@ -10,20 +10,21 @@ permissions:
 
 jobs:
   verify:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # pinned 2026-07-22
         with:
           toolchain: 1.94.0
           components: clippy,rustfmt
-      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2.8.2
-      - uses: taiki-e/install-action@b4b80945859e8ef89a9732a0f46499a443b196fe # v2.62.59
+      - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
+      - uses: taiki-e/install-action@c44f6b046f1c29ae5918b1e0bfdbb2f1813836fd # v2.84.1
         with:
-          tool: cargo-audit,cargo-cyclonedx,cargo-deny
+          tool: cargo-audit@0.22.2,cargo-cyclonedx@0.5.9,cargo-deny@0.20.2
+          fallback: none
       - name: Verify workspace
         run: ./scripts/check.sh
       - name: Verify operational workflows and release envelope

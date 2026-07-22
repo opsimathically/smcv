@@ -125,7 +125,7 @@ try {
     path.join(evidenceDirectory, screenReaderMode ? "screen-reader-smoke.json" : "browser-smoke.json"),
     { force: true },
   );
-  await completed("cargo", ["build", "--workspace"]);
+  await completed("cargo", ["build", "--locked", "--workspace"]);
   await completed(path.join(repository, "target/debug/smcv-cli"), ["init", "--database", database, "--root-key", rootKey]);
   const passwordFile = path.join(temporary, "synthetic-password-input");
   await writeFile(passwordFile, `${syntheticPassword}\n`, { mode: 0o600 });

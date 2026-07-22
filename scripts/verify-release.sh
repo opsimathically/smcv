@@ -102,6 +102,8 @@ root="$extracted/$expected_root"
       (.rustc_version | type == "string" and length > 0) and
       (.cargo_version | type == "string" and length > 0) and
       (.cyclonedx_version | type == "string" and length > 0) and
+      (.glibc_version == "glibc 2.39") and
+      (.openssl_version | type == "string" and startswith("OpenSSL 3.")) and
       .cargo_lock_sha256 == $lock and
       (.working_tree_dirty | type == "boolean") and
       (.external_signing == false)
@@ -116,6 +118,8 @@ root="$extracted/$expected_root"
       (.rustc_version | type == "string" and length > 0) and
       (.cargo_version | type == "string" and length > 0) and
       (.cyclonedx_version | type == "string" and length > 0) and
+      (.glibc_version == "glibc 2.39") and
+      (.openssl_version | type == "string" and startswith("OpenSSL 3.")) and
       .cargo_lock_sha256 == $lock and
       (.working_tree_dirty == false) and (.external_signing == false)
     ' PROVENANCE.json >/dev/null

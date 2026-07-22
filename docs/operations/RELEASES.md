@@ -15,8 +15,11 @@ internal file, and creates a sorted owner-normalized gzip tarball. Repeated
 builds from the same checkout and source epoch must have the same SHA-256.
 
 The local provenance records version, target, commit, source epoch, Rust/Cargo/
-CycloneDX tool versions, the bundled lockfile hash, locked Cargo builder, and
-the fact that no external signing identity was used. It is useful evidence,
+CycloneDX tool versions, exact glibc baseline, OpenSSL builder version, the
+bundled lockfile hash, locked Cargo builder, and the fact that no external
+signing identity was used. Construction rejects a host other than x86-64 GNU/
+Linux with glibc 2.39, and verification rejects missing or different runtime
+baseline claims. It is useful evidence,
 not a third-party attestation. If `SMCV_TEST_SIGNING_KEY_FILE` names a locally
 controlled PEM private key, the builder emits an optional detached test
 signature without copying that key into the artifact. A later unsigned build

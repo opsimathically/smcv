@@ -47,7 +47,7 @@ mod web;
 
 const SESSION_COOKIE: &str = "__Host-smcv_session";
 const REQUEST_BODY_LIMIT: usize = 1024 * 1024;
-const ARCHIVE_UPLOAD_BODY_LIMIT: usize = 8 * 1024 * 1024 * 1024;
+const ARCHIVE_UPLOAD_BODY_LIMIT: usize = 8 * 1024 * 1024 * 1024 + 1024 * 1024;
 const LOGIN_WINDOW_MS: i64 = 60_000;
 const LOGIN_ATTEMPTS_PER_WINDOW: u16 = 10;
 const PASSKEY_ATTEMPTS_PER_WINDOW: u16 = 20;

@@ -109,6 +109,11 @@ response bodies, raw URLs/query strings, secret names, user-submitted labels,
 authentication headers, cookies, key material, ciphertext, or decrypted data.
 Potentially attacker-controlled safe fields are length-bounded and sanitized.
 
+The packaged TLS proxy streams requests and responses with temporary-file
+buffering disabled. Its explicit body and timeout bounds accommodate the
+application's 8 GiB archive plus 1 MiB multipart envelope without weakening the
+application-side archive limit, and it clears forwarding and real-IP headers.
+
 The delivered optional metrics listener is independently loopback-only and uses
 fixed labels. It exposes readiness and aggregate request response-class,
 timeout, rate-limit, and readiness-check counters. Host/systemd monitoring owns

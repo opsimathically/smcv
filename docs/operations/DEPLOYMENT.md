@@ -1,7 +1,7 @@
 # Supported deployment and clean-host procedure
 
 Status: **Committed v1 release-candidate procedure**
-Last tested: 2026-07-21
+Last tested: 2026-07-22
 
 ## Support boundary
 
@@ -50,7 +50,11 @@ and one verified backup. Recovery media and its key must also exist off host.
 
 7. Configure the TLS proxy to clear `Forwarded` and all `X-Forwarded-*`
    headers. Do not proxy the loopback metrics port. SMCV deliberately rejects
-   trusted-proxy header mode in v1.
+   trusted-proxy header mode in v1. Use the packaged request/response streaming
+   directives: proxy buffering can otherwise write recovery passphrases,
+   protected JSON, or revealed values to nginx temporary files. The example
+   permits 8 GiB archives plus 1 MiB of multipart framing and aligns its
+   15-minute operation window with slightly longer proxy timeouts.
 8. Run `smcv-server preflight` under the exact service environment. It must
    report `status=ready` before enabling the unit.
 9. Enable `smcv.service` and `smcv-backup.timer`, then check the public liveness

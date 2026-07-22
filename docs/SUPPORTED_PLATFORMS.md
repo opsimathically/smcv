@@ -1,7 +1,7 @@
 # Supported v1 platform and configuration
 
 Status: **Committed for release candidate 0.1.0**
-Last reviewed: 2026-07-21
+Last reviewed: 2026-07-22
 
 ## Production support envelope
 
@@ -18,6 +18,12 @@ dynamically linked to those OpenSSL 3 libraries; both binaries require glibc
 2.39 or newer. Other Linux distributions are compatible only when they provide
 these interfaces and the packaged units pass `systemd-analyze verify`; they are
 not independently certified combinations.
+
+Candidate construction requires the exact `glibc 2.39` build baseline and
+records both the glibc and OpenSSL builder versions in checked provenance. CI
+uses the named Ubuntu 24.04 image rather than the moving `ubuntu-latest` alias.
+This prevents an unnoticed newer build host from raising the binary's minimum
+runtime while the support claim still says 2.39.
 
 Production traffic terminates HTTPS at the packaged same-host proxy pattern.
 The SMCV product and optional metrics listeners remain loopback-only. V1 does

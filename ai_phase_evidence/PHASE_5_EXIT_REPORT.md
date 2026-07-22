@@ -19,7 +19,7 @@ test signing.
 
 | Requirements / criterion | Evidence and result |
 |---|---|
-| OPS-001–003 | [Deployment procedure](../docs/operations/DEPLOYMENT.md), packaged systemd/nginx configuration, and startup tests enforce one unprivileged Linux instance, local SQLite, existing separate custody, effective-UID ownership, safe modes, loopback-only product/metrics listeners, HTTPS origin intent, known config, matching root/schema, and integrity readiness. |
+| OPS-001–003 | [Deployment procedure](../docs/operations/DEPLOYMENT.md), packaged systemd/nginx configuration, and startup tests enforce one unprivileged Linux instance, local SQLite, existing separate custody, effective-UID ownership, safe modes, loopback-only product/metrics listeners, HTTPS origin intent, known config, matching root/schema, and integrity readiness. The ten-pass supply-chain review additionally locks the nginx streaming/no-temporary-file boundary and exact 8 GiB + 1 MiB proxy envelope. |
 | OPS-004 | Initialization, backup/restore, upgrade/rollback, and all nine required incidents have executable procedures and a [synthetic tabletop](../docs/operations/TABLETOP_EXERCISES.md). |
 | OPS-005 | Frozen Phase 0 schema migration and committed `.smcvault` v1 fixture pass; rollback retains the matching old binary/snapshot and never attempts a down-migration. |
 | OPS-006 | Published bounds cover secret, request, archive, logical stream, records, concurrency, KDF queues, jobs, and retention inventory. Disk-full, WAL, capacity, and explicit-history behavior are tested. |

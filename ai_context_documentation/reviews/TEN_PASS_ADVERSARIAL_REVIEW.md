@@ -185,3 +185,24 @@ running/terminal expiry, active-session saturation and reclamation, hostile KDF
 bounds, committed archive compatibility, readiness/metrics response checks,
 the complete server/backup suites, and strict workspace all-feature Clippy. No
 Pass 8 critical/high finding remains open.
+
+## Pass 9 — dependencies, supply chain, unsafe code, and platform behavior
+
+Perspective: a compromised build input, a moving CI platform, a native-runtime
+ABI mismatch, a proxy using dangerous defaults, and an auditor attempting to
+reproduce the exact graph. Result: **six findings repaired and retested**.
+
+| ID | Severity | Finding | Repair and verification |
+|---|---|---|---|
+| A10-R9-001 | High | The packaged nginx example inherited a 1 MiB request limit and request/response buffering. Normal archive verification therefore failed above 1 MiB, while accepted password, recovery-key, secret, and reveal traffic could be written to nginx temporary files; default proxy timeouts also contradicted the 15-minute archive window. | The reference ingress now permits the exact 8 GiB archive plus 1 MiB multipart envelope, streams request and response bodies with proxy temporary files disabled, aligns client/proxy timeouts, suppresses version tokens, and clears forwarded, real-IP, and legacy Proxy headers. The operations campaign statically requires each security/streaming directive. |
+| A10-R9-002 | High | CI used the moving `ubuntu-latest` image even though the published binary support claim fixes glibc 2.39. A future runner transition could silently produce a binary requiring newer glibc while provenance continued to name only the generic GNU/Linux target. | CI now names Ubuntu 24.04. Release construction requires exact glibc 2.39, records glibc and OpenSSL builder versions, and verification rejects a changed baseline. The verifier regression rebuilds an internally consistent bundle claiming glibc 2.40 and rejects it. |
+| A10-R9-003 | Medium | The application body limit equaled the 8 GiB archive limit, leaving no bytes for mandatory multipart boundaries and key fields. The documented maximum archive could never pass either network adapter. | Normal-server and recovery-browser body envelopes now reserve 1 MiB above the independently enforced 8 GiB archive-file ceiling; ingress uses the same exact envelope. Archive streaming still rejects file bytes above 8 GiB. |
+| A10-R9-004 | Medium | CI pinned action commits, but its security-tool versions and runner baseline were not mechanically asserted; the pinned actions were also behind their current supported releases. | Checkout, Rust cache, tool installer, and Rust toolchain commits were resolved against upstream. Checkout 6.0.2, rust-cache 2.9.1, and install-action 2.84.1 are full-hash pinned; audit 0.22.2, CycloneDX 0.5.9, and deny 0.20.2 are exact with fallback disabled. The repository gate rejects a moving runner, non-hash action, or tool-version drift. |
+| A10-R9-005 | Medium | General validation builds did not pass `--locked`, and the CycloneDX command has no locked option or postcondition. A manifest/lock mismatch or SBOM-side graph rewrite was not explicitly rejected at every evidence boundary. | Clippy, tests, rustdoc, operations, and browser builds now require the lockfile. Release construction hashes `Cargo.lock` before SBOM generation and fails if the generator changes it. Cargo checksum/source policy and all seven SBOM structural checks remain active. |
+| A10-R9-006 | Low | The workspace enabled UUID v7 and tower-http timeout features that no first-party code used, unnecessarily widening compiled feature surface and obscuring that request timeout policy is application-owned. | Both unused features were removed. Locked metadata, strict all-feature Clippy, tests, and native linkage inspection pass; all first-party crate roots still forbid unsafe code. The required OpenSSL 3 dynamic boundary and transitive build-script inventory remain documented rather than being misrepresented as pure-Rust/hermetic. |
+
+Validation includes current RustSec and cargo-deny policy, locked metadata and
+build graph inventory, native ELF linkage/hardening inspection, upstream action
+commit resolution, release-verifier baseline rejection, nginx policy checks,
+release construction/verification, strict workspace lint/tests/docs, and shell
+syntax. No Pass 9 critical/high finding remains open.
