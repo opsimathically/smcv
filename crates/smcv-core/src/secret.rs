@@ -1,6 +1,6 @@
 use core::fmt;
 
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 /// Owned protected bytes with deliberately redacted formatting.
 pub struct ProtectedBytes(Zeroizing<Vec<u8>>);
@@ -47,6 +47,20 @@ impl ProtectedString {
         Self(Zeroizing::new(value))
     }
 
+    /// Takes ownership of UTF-8 bytes, zeroizing malformed input before it is
+    /// discarded.
+    #[must_use]
+    pub fn from_utf8(bytes: Vec<u8>) -> Option<Self> {
+        match String::from_utf8(bytes) {
+            Ok(value) => Some(Self::new(value)),
+            Err(error) => {
+                let mut rejected = error.into_bytes();
+                rejected.zeroize();
+                None
+            }
+        }
+    }
+
     /// Exposes protected text only at an explicit call site.
     #[must_use]
     pub fn expose(&self) -> &str {
@@ -71,5 +85,11 @@ mod tests {
 
         assert_eq!(format!("{bytes:?}"), "ProtectedBytes([REDACTED])");
         assert_eq!(format!("{text:?}"), "ProtectedString([REDACTED])");
+        assert_eq!(
+            ProtectedString::from_utf8(b"valid protected text".to_vec())
+                .map(|value| value.expose().to_owned()),
+            Some(String::from("valid protected text"))
+        );
+        assert!(ProtectedString::from_utf8(vec![0xff]).is_none());
     }
 }

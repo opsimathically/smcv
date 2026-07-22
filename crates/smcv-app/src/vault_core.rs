@@ -1522,20 +1522,22 @@ fn decode_metadata(
         )?);
     }
     if cursor != bytes.len()
-        || name.chars().any(char::is_control)
+        || name.expose().chars().any(char::is_control)
         || username
             .as_ref()
-            .is_some_and(|value| value.chars().any(char::is_control))
-        || tags.iter().any(|value| value.chars().any(char::is_control))
+            .is_some_and(|value| value.expose().chars().any(char::is_control))
+        || tags
+            .iter()
+            .any(|value| value.expose().chars().any(char::is_control))
     {
         return Err(VaultError::Integrity);
     }
     drop(plaintext);
     Ok(DecryptedMetadata {
-        name: ProtectedString::new(name),
-        description: description.map(ProtectedString::new),
-        username: username.map(ProtectedString::new),
-        tags: tags.into_iter().map(ProtectedString::new).collect(),
+        name,
+        description,
+        username,
+        tags,
     })
 }
 
@@ -1545,14 +1547,14 @@ fn read_metadata_string(
     length: usize,
     maximum: usize,
     require_nonempty: bool,
-) -> Result<String, VaultError> {
+) -> Result<ProtectedString, VaultError> {
     if length > maximum || (require_nonempty && length == 0) {
         return Err(VaultError::Integrity);
     }
     let end = cursor.checked_add(length).ok_or(VaultError::Integrity)?;
     let value = bytes.get(*cursor..end).ok_or(VaultError::Integrity)?;
     *cursor = end;
-    String::from_utf8(value.to_vec()).map_err(|_| VaultError::Integrity)
+    ProtectedString::from_utf8(value.to_vec()).ok_or(VaultError::Integrity)
 }
 
 fn clone_encrypted(record: &EncryptedRecord) -> EncryptedRecord {

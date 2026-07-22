@@ -147,9 +147,9 @@ impl KeyMaterial {
     ///
     /// Returns an error if the operating system cannot provide random bytes.
     pub fn generate() -> CryptoResult<Self> {
-        let mut bytes = [0_u8; KEY_LENGTH];
-        getrandom::fill(&mut bytes).map_err(|_| CryptoError::Randomness)?;
-        Ok(Self::new(bytes))
+        let mut bytes = Zeroizing::new([0_u8; KEY_LENGTH]);
+        getrandom::fill(bytes.as_mut()).map_err(|_| CryptoError::Randomness)?;
+        Ok(Self(bytes))
     }
 
     /// Converts a protected fixed-width plaintext into key material.
@@ -159,12 +159,13 @@ impl KeyMaterial {
     /// Returns an integrity error when the protected value is not exactly one
     /// 256-bit key.
     pub fn from_protected(bytes: ProtectedBytes) -> CryptoResult<Self> {
-        let key: [u8; KEY_LENGTH] = bytes
-            .expose()
-            .try_into()
-            .map_err(|_| CryptoError::Integrity)?;
+        if bytes.len() != KEY_LENGTH {
+            return Err(CryptoError::Integrity);
+        }
+        let mut key = Zeroizing::new([0_u8; KEY_LENGTH]);
+        key.copy_from_slice(bytes.expose());
         drop(bytes);
-        Ok(Self::new(key))
+        Ok(Self(key))
     }
 
     /// Copies the key into an explicitly protected, zeroizing transport value.
@@ -225,7 +226,11 @@ pub fn create_root_key_file(
 ) -> CryptoResult<KeyMaterial> {
     let key = KeyMaterial::generate()?;
     let mut options = OpenOptions::new();
-    options.write(true).create_new(true).mode(0o600);
+    options
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
     let mut file = options.open(path).map_err(|_| CryptoError::KeyProvider)?;
     file.write_all(ROOT_KEY_MAGIC)
         .and_then(|()| file.write_all(vault_id.as_bytes()))
@@ -245,9 +250,12 @@ pub fn create_root_key_file(
 /// bits, has invalid framing, cannot be read, or cannot be bound to UUIDs.
 #[cfg(unix)]
 pub fn load_root_key_file(path: &Path) -> CryptoResult<RootKeyRecord> {
-    let metadata = path
-        .symlink_metadata()
-        .map_err(|_| CryptoError::KeyProvider)?;
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC);
+    let mut file = options.open(path).map_err(|_| CryptoError::KeyProvider)?;
+    let metadata = file.metadata().map_err(|_| CryptoError::KeyProvider)?;
     if !metadata.file_type().is_file()
         || metadata.len() != ROOT_KEY_FILE_LENGTH as u64
         || metadata.permissions().mode() & 0o077 != 0
@@ -255,8 +263,7 @@ pub fn load_root_key_file(path: &Path) -> CryptoResult<RootKeyRecord> {
         return Err(CryptoError::KeyProvider);
     }
     let mut bytes = Zeroizing::new([0_u8; ROOT_KEY_FILE_LENGTH]);
-    File::open(path)
-        .and_then(|mut file| file.read_exact(bytes.as_mut()))
+    file.read_exact(bytes.as_mut())
         .map_err(|_| CryptoError::KeyProvider)?;
     if &bytes[0..8] != ROOT_KEY_MAGIC {
         return Err(CryptoError::KeyProvider);
@@ -264,12 +271,12 @@ pub fn load_root_key_file(path: &Path) -> CryptoResult<RootKeyRecord> {
     let vault_uuid = uuid::Uuid::from_slice(&bytes[8..24]).map_err(|_| CryptoError::KeyProvider)?;
     let installation_uuid =
         uuid::Uuid::from_slice(&bytes[24..40]).map_err(|_| CryptoError::KeyProvider)?;
-    let mut key = [0_u8; KEY_LENGTH];
+    let mut key = Zeroizing::new([0_u8; KEY_LENGTH]);
     key.copy_from_slice(&bytes[40..72]);
     Ok(RootKeyRecord {
         vault_id: VaultId::from_uuid(vault_uuid),
         installation_id: InstallationId::from_uuid(installation_uuid),
-        key: KeyMaterial::new(key),
+        key: KeyMaterial(key),
     })
 }
 
@@ -670,7 +677,7 @@ pub fn token_lookup_id(presented: &str) -> Option<[u8; TOKEN_LOOKUP_LENGTH]> {
     let encoded = presented.strip_prefix("smcv_v1.")?;
     let mut fields = encoded.split('.');
     let lookup = URL_SAFE_NO_PAD.decode(fields.next()?).ok()?;
-    let secret = URL_SAFE_NO_PAD.decode(fields.next()?).ok()?;
+    let secret = decode_protected_base64(fields.next()?)?;
     if fields.next().is_some()
         || lookup.len() != TOKEN_LOOKUP_LENGTH
         || secret.len() != TOKEN_SECRET_LENGTH
@@ -811,7 +818,6 @@ pub fn verify_csrf(
     expected_lookup: &[u8; SESSION_LOOKUP_LENGTH],
     expected_verifier: &SessionVerifier,
 ) -> CryptoResult<bool> {
-    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
     use subtle::ConstantTimeEq;
 
     if presented.len() > 64 {
@@ -820,7 +826,7 @@ pub fn verify_csrf(
     let Some(encoded) = presented.strip_prefix("smcvc_v1.") else {
         return Ok(false);
     };
-    let Ok(secret) = URL_SAFE_NO_PAD.decode(encoded) else {
+    let Some(secret) = decode_protected_base64(encoded) else {
         return Ok(false);
     };
     if secret.len() != SESSION_SECRET_LENGTH {
@@ -835,7 +841,7 @@ pub fn verify_csrf(
     Ok(actual.0.ct_eq(&expected_verifier.0).into())
 }
 
-fn decode_session_token(presented: &str) -> Option<(Vec<u8>, Vec<u8>)> {
+fn decode_session_token(presented: &str) -> Option<(Vec<u8>, Zeroizing<Vec<u8>>)> {
     use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
     if presented.len() > 96 {
@@ -844,7 +850,7 @@ fn decode_session_token(presented: &str) -> Option<(Vec<u8>, Vec<u8>)> {
     let encoded = presented.strip_prefix("smcvs_v1.")?;
     let mut fields = encoded.split('.');
     let lookup = URL_SAFE_NO_PAD.decode(fields.next()?).ok()?;
-    let secret = URL_SAFE_NO_PAD.decode(fields.next()?).ok()?;
+    let secret = decode_protected_base64(fields.next()?)?;
     if fields.next().is_some()
         || lookup.len() != SESSION_LOOKUP_LENGTH
         || secret.len() != SESSION_SECRET_LENGTH
@@ -871,6 +877,16 @@ fn session_verifier(
     let mut verifier = [0_u8; 32];
     verifier.copy_from_slice(&mac.finalize().into_bytes());
     Ok(SessionVerifier(verifier))
+}
+
+fn decode_protected_base64(encoded: &str) -> Option<Zeroizing<Vec<u8>>> {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+
+    let mut decoded = Zeroizing::new(Vec::with_capacity(encoded.len()));
+    URL_SAFE_NO_PAD
+        .decode_vec(encoded.as_bytes(), decoded.as_mut())
+        .ok()?;
+    Some(decoded)
 }
 
 /// Verifies one bounded application credential against its candidate record.
@@ -910,7 +926,7 @@ pub fn verify_token(
     let Ok(lookup) = URL_SAFE_NO_PAD.decode(lookup_text) else {
         return Ok(false);
     };
-    let Ok(secret) = URL_SAFE_NO_PAD.decode(secret_text) else {
+    let Some(secret) = decode_protected_base64(secret_text) else {
         return Ok(false);
     };
     if lookup.len() != TOKEN_LOOKUP_LENGTH || secret.len() != TOKEN_SECRET_LENGTH {

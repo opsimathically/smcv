@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use uuid::Uuid;
-use zeroize::{Zeroize, Zeroizing};
+use zeroize::Zeroizing;
 
 /// On-disk archive magic for format version 1.
 pub const MAGIC: [u8; 8] = *b"SMCVLT01";
@@ -225,17 +225,11 @@ pub fn parse_public_header(
 }
 
 /// A generated uniformly random backup recovery key.
-pub struct RecoveryKey([u8; 32]);
+pub struct RecoveryKey(Zeroizing<[u8; 32]>);
 
 impl core::fmt::Debug for RecoveryKey {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter.write_str("RecoveryKey([REDACTED])")
-    }
-}
-
-impl Drop for RecoveryKey {
-    fn drop(&mut self) {
-        self.0.zeroize();
     }
 }
 
@@ -247,8 +241,8 @@ impl RecoveryKey {
     /// Returns unavailable when the operating system cannot provide random
     /// bytes.
     pub fn generate() -> Result<Self, ArchiveError> {
-        let mut key = [0_u8; 32];
-        getrandom::fill(&mut key).map_err(|_| ArchiveError::Unavailable)?;
+        let mut key = Zeroizing::new([0_u8; 32]);
+        getrandom::fill(key.as_mut()).map_err(|_| ArchiveError::Unavailable)?;
         Ok(Self(key))
     }
 
@@ -267,11 +261,13 @@ impl RecoveryKey {
         if fields.next().is_some() || checksum.len() != 8 {
             return Err(ArchiveError::InvalidKey);
         }
-        let key: [u8; 32] = URL_SAFE_NO_PAD
-            .decode(body)
-            .map_err(|_| ArchiveError::InvalidKey)?
-            .try_into()
+        let mut key = Zeroizing::new([0_u8; 32]);
+        let decoded = URL_SAFE_NO_PAD
+            .decode_slice(body, key.as_mut())
             .map_err(|_| ArchiveError::InvalidKey)?;
+        if decoded != key.len() {
+            return Err(ArchiveError::InvalidKey);
+        }
         if recovery_checksum(&key) != checksum {
             return Err(ArchiveError::InvalidKey);
         }
@@ -283,7 +279,7 @@ impl RecoveryKey {
     pub fn expose_once(&self) -> String {
         format!(
             "smcvbrk_v1.{}.{}",
-            URL_SAFE_NO_PAD.encode(self.0),
+            URL_SAFE_NO_PAD.encode(self.0.as_ref()),
             recovery_checksum(&self.0)
         )
     }
@@ -509,9 +505,9 @@ pub fn write_archive<R: Read, W: Write>(
     let mut counter = RecordCounter::new(options.record_limit);
     let chunk_bytes =
         usize::try_from(options.chunk_bytes).map_err(|_| ArchiveError::InvalidBound)?;
-    let mut chunk = vec![0_u8; chunk_bytes];
+    let mut chunk = Zeroizing::new(vec![0_u8; chunk_bytes]);
     loop {
-        let read = logical_stream.read(&mut chunk)?;
+        let read = logical_stream.read(chunk.as_mut())?;
         if read == 0 {
             break;
         }
@@ -748,7 +744,7 @@ fn derive_wrapping_key(
             Ok(output)
         }
         (ArchiveKey::Recovery(recovery), KeyMode::RecoveryKey) => {
-            let mut mac = <Hmac<Sha256> as HmacKeyInit>::new_from_slice(&recovery.0)
+            let mut mac = <Hmac<Sha256> as HmacKeyInit>::new_from_slice(recovery.0.as_ref())
                 .map_err(|_| ArchiveError::Unavailable)?;
             mac.update(b"SMCV-BACKUP-WRAP-v1");
             mac.update(header.archive_id.as_bytes());
@@ -834,7 +830,7 @@ fn read_frame<R: Read>(
     archive_id: Uuid,
     expected_sequence: u64,
     chunk_bytes: u32,
-) -> Result<(u8, Vec<u8>, u64), ArchiveError> {
+) -> Result<(u8, Zeroizing<Vec<u8>>, u64), ArchiveError> {
     let mut frame_header = [0_u8; FRAME_HEADER_BYTES];
     source.read_exact(&mut frame_header)?;
     let ciphertext_len = u32::from_be_bytes(
@@ -871,15 +867,17 @@ fn read_frame<R: Read>(
     let nonce = XNonce::from(nonce_bytes);
     let aad = frame_aad(archive_id, sequence, kind, ciphertext_len);
     let cipher = XChaCha20Poly1305::new_from_slice(key).map_err(|_| ArchiveError::Unavailable)?;
-    let plaintext = cipher
-        .decrypt(
-            &nonce,
-            Payload {
-                msg: &ciphertext,
-                aad: &aad,
-            },
-        )
-        .map_err(|_| ArchiveError::Integrity)?;
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(
+                &nonce,
+                Payload {
+                    msg: &ciphertext,
+                    aad: &aad,
+                },
+            )
+            .map_err(|_| ArchiveError::Integrity)?,
+    );
     let size = u64::try_from(FRAME_HEADER_BYTES + ciphertext_len_usize)
         .map_err(|_| ArchiveError::InvalidBound)?;
     Ok((kind, plaintext, size))
@@ -1418,7 +1416,7 @@ mod tests {
         fn arbitrary_complete_archives_never_panic(
             input in prop::collection::vec(any::<u8>(), 0..4096)
         ) {
-            let key = RecoveryKey([0x42; 32]);
+            let key = RecoveryKey([0x42; 32].into());
             let _result = verify_archive(
                 Cursor::new(&input),
                 input.len() as u64,

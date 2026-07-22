@@ -45,3 +45,22 @@ SMCV_ALLOW_DIRTY_VERIFY=1 ./scripts/release-candidate-smoke.sh dist/smcv-0.1.0-x
 No Pass 1 critical/high finding remains open. The next pass begins from these
 repairs and reviews cryptography, key lifecycle, plaintext handling, and memory
 exposure without relying on prior assurance conclusions.
+
+## Pass 2 — cryptography, key lifecycle, and plaintext exposure
+
+Perspective: a local path adversary, memory-forensics observer after buffer
+release, hostile archive/token supplier, and interrupted key custodian. Result:
+**four findings repaired and retested**.
+
+| ID | Severity | Finding | Repair and verification |
+|---|---|---|---|
+| A10-R2-001 | High | Root-provider loading checked metadata by pathname and then reopened the path. A replacement between those operations could make the validated object differ from the key bytes read; immediate custody-directory symlinks were also accepted. | Root providers now open once with `O_NOFOLLOW` and `O_CLOEXEC`, validate type/length/mode on that descriptor, and read from it. Creation also uses no-follow/close-on-exec, and initialization rejects a symlinked immediate custody parent. Existing provider symlink rejection plus a new parent-symlink regression pass. |
+| A10-R2-002 | Medium | Key-generation temporaries and decoded application/session/CSRF token secrets used ordinary stack arrays or vectors on some success and rejection paths. | Generated key buffers and every decoded bearer-secret component now enter a zeroizing owner before fallible work and remain there through verification. Public lookup components remain ordinary data by design. |
+| A10-R2-003 | Medium | Backup recovery keys, plaintext archive read/write chunks, base64-decoded restore values, and decrypted logical key/metadata fields could be freed without zeroization, particularly after malformed input or a later restore error. | Recovery keys and archive plaintext frames/chunks now use zeroizing storage. Protected logical fields deserialize into zeroizing strings, base64 decoders use zeroizing destinations, and malformed key inputs are cleared before returning. The committed v1 fixture and complete clean-environment re-encryption restore still pass. |
+| A10-R2-004 | Medium | Protected descriptor and multipart inputs first occupied ordinary `String`/`Vec` allocations; descriptor trimming also copied secret text and could silently alter a passphrase ending in whitespace. | CLI descriptor reads and browser/server recovery-key fields now accumulate directly into zeroizing owners, explicitly clear invalid UTF-8, and remove only transport CR/LF in place without a plaintext copy. |
+
+Validation includes the complete crypto, backup, application, CLI, and server
+test suites, the frozen AEAD/metadata/archive compatibility fixtures, hostile
+credential properties, wrong-key/corruption checks, rotation restart tests,
+and the new custody-parent symlink rejection. No Pass 2 critical/high finding
+remains open.

@@ -132,9 +132,9 @@ impl From<std::io::Error> for BackupError {
 
 #[derive(Serialize, Deserialize)]
 struct LogicalKeys {
-    blind_index: String,
-    audit: String,
-    token_verifier: String,
+    blind_index: Zeroizing<String>,
+    audit: Zeroizing<String>,
+    token_verifier: Zeroizing<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -143,7 +143,7 @@ struct LogicalNamespace {
     parent_namespace_id: Option<NamespaceId>,
     name_index: [u8; 32],
     metadata_version: u64,
-    metadata: String,
+    metadata: Zeroizing<String>,
     lifecycle_state: String,
     revision: u64,
     state_commitment: [u8; 32],
@@ -157,7 +157,7 @@ struct LogicalSecret {
     namespace_id: NamespaceId,
     name_index: [u8; 32],
     metadata_version: u64,
-    metadata: String,
+    metadata: Zeroizing<String>,
     lifecycle_state: String,
     current_version: u64,
     revision: u64,
@@ -171,7 +171,7 @@ struct LogicalSecret {
 struct LogicalSecretVersion {
     secret_id: SecretId,
     version: u64,
-    payload: String,
+    payload: Zeroizing<String>,
     schedule: SecretSchedule,
     created_by_principal_id: Option<PrincipalId>,
     created_at_unix_ms: i64,
@@ -217,7 +217,7 @@ struct LogicalAuthenticator {
 struct LogicalServiceIdentity {
     principal_id: PrincipalId,
     metadata_version: u64,
-    metadata: String,
+    metadata: Zeroizing<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -246,7 +246,7 @@ struct LogicalPolicy {
     revision: u64,
     state: String,
     metadata_version: u64,
-    metadata: String,
+    metadata: Zeroizing<String>,
     state_commitment: [u8; 32],
     created_at_unix_ms: i64,
     updated_at_unix_ms: i64,
@@ -614,10 +614,10 @@ impl InitializedVault {
         wrapped_kind: ObjectKind,
         object_id: ObjectId,
         version: u64,
-    ) -> Result<String, BackupError> {
+    ) -> Result<Zeroizing<String>, BackupError> {
         let plaintext =
             self.decrypt_record(encrypted, object_kind, wrapped_kind, object_id, version)?;
-        Ok(URL_SAFE_NO_PAD.encode(plaintext.expose()))
+        Ok(Zeroizing::new(URL_SAFE_NO_PAD.encode(plaintext.expose())))
     }
 
     /// Restores a fully verified archive into brand-new database and root-key
@@ -1066,12 +1066,12 @@ impl InitializedVault {
         object_id: ObjectId,
         version: u64,
     ) -> Result<EncryptedRecord, BackupError> {
-        let bytes = URL_SAFE_NO_PAD
-            .decode(encoded.as_bytes())
-            .map_err(|_| BackupError::Integrity)?;
+        let mut bytes = Zeroizing::new(Vec::with_capacity(encoded.len()));
+        let decoded = URL_SAFE_NO_PAD.decode_vec(encoded.as_bytes(), bytes.as_mut());
         encoded.zeroize();
+        decoded.map_err(|_| BackupError::Integrity)?;
         self.encrypt_record(
-            ProtectedBytes::new(bytes),
+            ProtectedBytes::new(std::mem::take(bytes.as_mut())),
             object_kind,
             wrapped_kind,
             object_id,
@@ -1304,13 +1304,15 @@ fn decode_vault_keys(mut keys: LogicalKeys) -> Result<PortableVaultKeys, BackupE
 }
 
 fn decode_key(encoded: &mut String) -> Result<KeyMaterial, BackupError> {
-    let bytes: [u8; 32] = URL_SAFE_NO_PAD
-        .decode(encoded.as_bytes())
-        .map_err(|_| BackupError::Integrity)?
-        .try_into()
-        .map_err(|_| BackupError::Integrity)?;
+    let mut bytes = Zeroizing::new([0_u8; 32]);
+    let decoded = URL_SAFE_NO_PAD.decode_slice(encoded.as_bytes(), bytes.as_mut());
     encoded.zeroize();
-    Ok(KeyMaterial::new(bytes))
+    let length = decoded.map_err(|_| BackupError::Integrity)?;
+    if length != bytes.len() {
+        return Err(BackupError::Integrity);
+    }
+    KeyMaterial::from_protected(ProtectedBytes::new(bytes.to_vec()))
+        .map_err(|_| BackupError::Integrity)
 }
 
 fn decode_logical_stream(
@@ -1424,9 +1426,9 @@ fn append_record(
     Ok(())
 }
 
-fn encode_key(key: &KeyMaterial) -> String {
+fn encode_key(key: &KeyMaterial) -> Zeroizing<String> {
     let protected = key.to_protected_bytes();
-    URL_SAFE_NO_PAD.encode(protected.expose())
+    Zeroizing::new(URL_SAFE_NO_PAD.encode(protected.expose()))
 }
 
 fn principal_kind(value: PrincipalKind) -> &'static str {
@@ -1450,7 +1452,7 @@ impl From<&PortableNamespace> for LogicalNamespace {
             parent_namespace_id: row.parent_namespace_id,
             name_index: row.name_index,
             metadata_version: row.metadata_version,
-            metadata: String::new(),
+            metadata: Zeroizing::new(String::new()),
             lifecycle_state: row.lifecycle_state.clone(),
             revision: row.revision,
             state_commitment: row.state_commitment,
@@ -1466,7 +1468,7 @@ impl From<&PortableSecret> for LogicalSecret {
             namespace_id: row.namespace_id,
             name_index: row.name_index,
             metadata_version: row.metadata_version,
-            metadata: String::new(),
+            metadata: Zeroizing::new(String::new()),
             lifecycle_state: row.lifecycle_state.clone(),
             current_version: row.current_version,
             revision: row.revision,
@@ -1482,7 +1484,7 @@ impl From<&PortableSecretVersion> for LogicalSecretVersion {
         Self {
             secret_id: row.secret_id,
             version: row.version,
-            payload: String::new(),
+            payload: Zeroizing::new(String::new()),
             schedule: row.schedule,
             created_by_principal_id: row.created_by_principal_id,
             created_at_unix_ms: row.created_at_unix_ms,
@@ -1536,7 +1538,7 @@ impl From<&PortableServiceIdentity> for LogicalServiceIdentity {
         Self {
             principal_id: row.principal_id,
             metadata_version: row.metadata_version,
-            metadata: String::new(),
+            metadata: Zeroizing::new(String::new()),
         }
     }
 }
@@ -1563,7 +1565,7 @@ impl From<&PortablePolicy> for LogicalPolicy {
             revision: row.revision,
             state: row.state.clone(),
             metadata_version: row.metadata_version,
-            metadata: String::new(),
+            metadata: Zeroizing::new(String::new()),
             state_commitment: row.state_commitment,
             created_at_unix_ms: row.created_at_unix_ms,
             updated_at_unix_ms: row.updated_at_unix_ms,

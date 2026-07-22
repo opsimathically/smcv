@@ -1332,9 +1332,7 @@ fn decode_policy_label(plaintext: &ProtectedBytes) -> Result<ProtectedString, Au
     if length == 0 || length > MAX_POLICY_LABEL_BYTES || bytes.len() != 10 + length {
         return Err(AuthorizationError::Integrity);
     }
-    String::from_utf8(bytes[10..].to_vec())
-        .map(ProtectedString::new)
-        .map_err(|_| AuthorizationError::Integrity)
+    ProtectedString::from_utf8(bytes[10..].to_vec()).ok_or(AuthorizationError::Integrity)
 }
 
 #[cfg(all(test, unix))]

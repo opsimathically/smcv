@@ -1,7 +1,7 @@
 # Cryptography and key management
 
 Status: **Committed construction and primitive selection**
-Last reviewed: 2026-07-21
+Last reviewed: 2026-07-22
 
 ## Rules
 
@@ -91,6 +91,12 @@ Initialization generates root and vault key material from the operating
 system's cryptographically secure random source, writes files with restrictive
 creation semantics, and never prints a key unless the selected explicit
 recovery workflow requires a display-once recovery value.
+
+The committed local provider opens with no-follow and close-on-exec flags,
+then checks regular-file type, exact framing length, and mode on the opened
+descriptor before reading. The immediate custody directory itself must be a
+restrictive real directory, not a symlink. This keeps provider validation and
+use on one kernel object rather than validating a pathname and reopening it.
 
 ## Human password verification
 
@@ -183,8 +189,10 @@ these different events.
 
 - Secret-bearing types avoid `Debug`, `Display`, serialization defaults, and
   implicit cloning.
-- Plaintext buffers are scoped narrowly and zeroized where the library and
-  ownership model permit.
+- Plaintext buffers are scoped narrowly. Keys, decoded bearer-token
+  components, archive plaintext chunks, protected metadata copies, and
+  protected CLI/multipart inputs use zeroizing owners on both success and
+  rejection paths where the library and ownership model permit.
 - Core dumps and swap exposure are deployment concerns documented for
   operators; memory locking may be offered best-effort.
 - Authentication and verifier comparisons are constant-time where secrets are

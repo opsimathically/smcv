@@ -26,7 +26,7 @@ use smcv_backup::{ArchiveKey, KeyMode, RecoveryKey, VerifiedArchive};
 use subtle::ConstantTimeEq as _;
 use tokio::{io::AsyncWriteExt as _, net::TcpListener, sync::Notify};
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 const CHANNEL_TTL: Duration = Duration::from_secs(10 * 60);
 const MAX_ARCHIVE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -474,7 +474,7 @@ async fn receive_upload(
         let name = field.name().unwrap_or_default().to_owned();
         match name.as_str() {
             "key_mode" | "key" => {
-                let mut value = Vec::new();
+                let mut value = Zeroizing::new(Vec::new());
                 while let Some(chunk) = field.chunk().await.map_err(|_| {
                     RecoveryError(StatusCode::BAD_REQUEST, "The recovery upload is invalid.")
                 })? {
@@ -486,17 +486,22 @@ async fn receive_upload(
                     }
                     value.extend_from_slice(&chunk);
                 }
-                let value = String::from_utf8(value).map_err(|_| {
-                    RecoveryError(StatusCode::BAD_REQUEST, "A recovery field is invalid.")
-                })?;
                 if name == "key_mode" {
+                    let value = String::from_utf8(value.to_vec()).map_err(|_| {
+                        RecoveryError(StatusCode::BAD_REQUEST, "A recovery field is invalid.")
+                    })?;
                     if key_mode.replace(value).is_some() {
                         return Err(RecoveryError(
                             StatusCode::BAD_REQUEST,
                             "A recovery field was repeated.",
                         ));
                     }
-                } else if key.replace(Zeroizing::new(value)).is_some() {
+                } else if key
+                    .replace(protected_utf8(value).map_err(|()| {
+                        RecoveryError(StatusCode::BAD_REQUEST, "A recovery field is invalid.")
+                    })?)
+                    .is_some()
+                {
                     return Err(RecoveryError(
                         StatusCode::BAD_REQUEST,
                         "A recovery field was repeated.",
@@ -569,6 +574,17 @@ async fn receive_upload(
             StatusCode::BAD_REQUEST,
             "The recovery upload is incomplete.",
         )),
+    }
+}
+
+fn protected_utf8(mut bytes: Zeroizing<Vec<u8>>) -> Result<Zeroizing<String>, ()> {
+    match String::from_utf8(std::mem::take(bytes.as_mut())) {
+        Ok(value) => Ok(Zeroizing::new(value)),
+        Err(error) => {
+            let mut rejected = error.into_bytes();
+            rejected.zeroize();
+            Err(())
+        }
     }
 }
 

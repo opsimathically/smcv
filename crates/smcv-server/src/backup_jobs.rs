@@ -23,7 +23,7 @@ use tokio::io::AsyncWriteExt as _;
 use tower::ServiceExt as _;
 use tower_http::services::ServeFile;
 use uuid::Uuid;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::{ApiError, ApiState, authenticate_owner, map_vault_error, now_unix_ms, request_id};
 
@@ -601,7 +601,7 @@ async fn receive_verification_upload(
         let name = field.name().unwrap_or_default().to_owned();
         match name.as_str() {
             "key_mode" | "key" => {
-                let mut value = Vec::new();
+                let mut value = Zeroizing::new(Vec::new());
                 while let Some(chunk) = field
                     .chunk()
                     .await
@@ -612,12 +612,16 @@ async fn receive_verification_upload(
                     }
                     value.extend_from_slice(&chunk);
                 }
-                let value = String::from_utf8(value).map_err(|_| ApiError::invalid(request))?;
                 if name == "key_mode" {
+                    let value = String::from_utf8(value.to_vec())
+                        .map_err(|_| ApiError::invalid(request))?;
                     if key_mode.replace(value).is_some() {
                         return Err(ApiError::invalid(request));
                     }
-                } else if key.replace(Zeroizing::new(value)).is_some() {
+                } else if key
+                    .replace(protected_utf8(value).map_err(|()| ApiError::invalid(request))?)
+                    .is_some()
+                {
                     return Err(ApiError::invalid(request));
                 }
             }
@@ -661,6 +665,17 @@ async fn receive_verification_upload(
     match (key_mode, key, archive_bytes) {
         (Some(mode), Some(key), Some(bytes)) if bytes > 0 => Ok((mode, key, bytes)),
         _ => Err(ApiError::invalid(request)),
+    }
+}
+
+fn protected_utf8(mut bytes: Zeroizing<Vec<u8>>) -> Result<Zeroizing<String>, ()> {
+    match String::from_utf8(std::mem::take(bytes.as_mut())) {
+        Ok(value) => Ok(Zeroizing::new(value)),
+        Err(error) => {
+            let mut rejected = error.into_bytes();
+            rejected.zeroize();
+            Err(())
+        }
     }
 }
 

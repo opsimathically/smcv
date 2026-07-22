@@ -1656,6 +1656,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hex",
  "hmac",
+ "libc",
  "proptest",
  "sha2",
  "smcv-core",

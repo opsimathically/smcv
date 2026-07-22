@@ -1,7 +1,7 @@
 # Threat and trust model
 
 Status: **Committed baseline**
-Last reviewed: 2026-07-21
+Last reviewed: 2026-07-22
 Required review: every release and any architecture or cryptographic change
 
 ## Protected assets

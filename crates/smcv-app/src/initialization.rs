@@ -404,9 +404,12 @@ pub(crate) fn prepare_parent(path: &Path) -> Result<(), InitializationError> {
             .map_err(|_| InitializationError::UnsafePath)?;
     }
     let metadata = parent
-        .metadata()
+        .symlink_metadata()
         .map_err(|_| InitializationError::UnsafePath)?;
-    if !metadata.is_dir() || metadata.permissions().mode() & 0o077 != 0 {
+    if !metadata.file_type().is_dir()
+        || metadata.file_type().is_symlink()
+        || metadata.permissions().mode() & 0o077 != 0
+    {
         return Err(InitializationError::UnsafePath);
     }
     Ok(())
@@ -583,7 +586,10 @@ fn unwrap_key(
 
 #[cfg(all(test, unix))]
 mod tests {
-    use std::{fs, os::unix::fs::DirBuilderExt};
+    use std::{
+        fs,
+        os::unix::fs::{DirBuilderExt, symlink},
+    };
 
     use smcv_core::{InstallationId, VaultId};
     use smcv_crypto::create_root_key_file;
@@ -700,6 +706,31 @@ mod tests {
         assert!(matches!(
             initialize_vault(&database, &root, 1_800_000_000_001),
             Err(InitializationError::MissingRootKey)
+        ));
+    }
+
+    #[test]
+    fn initialization_rejects_a_symlinked_custody_parent() {
+        let directory =
+            TempDir::new().unwrap_or_else(|error| panic!("synthetic directory must open: {error}"));
+        let database = directory.path().join("database/vault.sqlite");
+        let actual_provider = directory.path().join("actual-provider");
+        let mut builder = fs::DirBuilder::new();
+        builder
+            .mode(0o700)
+            .create(&actual_provider)
+            .unwrap_or_else(|error| panic!("provider directory must create: {error}"));
+        let linked_provider = directory.path().join("provider");
+        symlink(&actual_provider, &linked_provider)
+            .unwrap_or_else(|error| panic!("provider symlink must create: {error}"));
+
+        assert!(matches!(
+            initialize_vault(
+                &database,
+                &linked_provider.join("root.key"),
+                1_800_000_000_000
+            ),
+            Err(InitializationError::UnsafePath)
         ));
     }
 }

@@ -374,9 +374,7 @@ fn obtain_owner_password(
     confirmation_prompt: &str,
 ) -> Result<Zeroizing<String>, Box<dyn Error>> {
     if let Some(descriptor) = descriptor {
-        return Ok(Zeroizing::new(
-            read_key_fd(descriptor)?.trim_end().to_owned(),
-        ));
+        return read_key_fd(descriptor);
     }
     let first = Zeroizing::new(rpassword::prompt_password(first_prompt)?);
     let second = Zeroizing::new(rpassword::prompt_password(confirmation_prompt)?);
@@ -391,7 +389,7 @@ fn obtain_existing_key(
     descriptor: Option<u32>,
 ) -> Result<SuppliedKey, Box<dyn Error>> {
     let protected = if let Some(descriptor) = descriptor {
-        Zeroizing::new(read_key_fd(descriptor)?)
+        read_key_fd(descriptor)?
     } else {
         let prompt = match mode {
             KeyMode::PassphraseArgon2id => "Backup passphrase: ",
@@ -405,7 +403,7 @@ fn obtain_existing_key(
     }
 }
 
-fn read_key_fd(descriptor: u32) -> Result<String, Box<dyn Error>> {
+fn read_key_fd(descriptor: u32) -> Result<Zeroizing<String>, Box<dyn Error>> {
     if descriptor <= 2 {
         return Err("protected key descriptor must be greater than 2".into());
     }
@@ -414,14 +412,17 @@ fn read_key_fd(descriptor: u32) -> Result<String, Box<dyn Error>> {
     if metadata.len() > 4096 {
         return Err("protected key input is too large".into());
     }
-    let mut protected = String::new();
+    let mut protected = Zeroizing::new(String::new());
     fs::File::open(path)?
         .take(4097)
         .read_to_string(&mut protected)?;
     if protected.len() > 4096 {
         return Err("protected key input is too large".into());
     }
-    Ok(protected.trim_end().to_owned())
+    while protected.ends_with(['\r', '\n']) {
+        protected.pop();
+    }
+    Ok(protected)
 }
 
 fn require_confirmation(prompt: &str, expected: &str) -> Result<(), Box<dyn Error>> {

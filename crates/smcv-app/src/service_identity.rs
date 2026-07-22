@@ -722,18 +722,16 @@ fn decode_service_metadata(
     if offset != bytes.len() || label.is_empty() {
         return Err(AuthenticationError::Integrity);
     }
-    let label = String::from_utf8(label.to_vec()).map_err(|_| AuthenticationError::Integrity)?;
+    let label = ProtectedString::from_utf8(label.to_vec()).ok_or(AuthenticationError::Integrity)?;
     let description = if description.is_empty() {
         None
     } else {
-        Some(ProtectedString::new(
-            String::from_utf8(description.to_vec()).map_err(|_| AuthenticationError::Integrity)?,
-        ))
+        Some(
+            ProtectedString::from_utf8(description.to_vec())
+                .ok_or(AuthenticationError::Integrity)?,
+        )
     };
-    Ok(ServiceIdentityMetadata {
-        label: ProtectedString::new(label),
-        description,
-    })
+    Ok(ServiceIdentityMetadata { label, description })
 }
 
 fn append_field(output: &mut Vec<u8>, field: &[u8]) -> Result<(), AuthenticationError> {

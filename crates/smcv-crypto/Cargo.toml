@@ -10,6 +10,7 @@ base64.workspace = true
 chacha20poly1305.workspace = true
 getrandom.workspace = true
 hmac.workspace = true
+libc.workspace = true
 sha2.workspace = true
 smcv-core = { version = "=0.1.0", path = "../smcv-core" }
 subtle.workspace = true
