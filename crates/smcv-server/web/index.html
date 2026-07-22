@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="light dark">
+  <meta name="referrer" content="no-referrer">
+  <title>SMCV</title>
+  <link rel="stylesheet" href="/assets/styles.css">
+  <script type="module" src="/assets/app.js"></script>
+</head>
+<body>
+  <a id="skip-link" class="skip-link" href="#login-title">Skip to authentication</a>
+
+  <main id="login-view" class="login-layout" aria-labelledby="login-title">
+    <section class="login-card">
+      <div class="brand" aria-label="SMCV Secret Manager and Credentials Vault">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <span>SMCV</span>
+      </div>
+      <div class="eyebrow">Local vault access</div>
+      <h1 id="login-title">Unlock your control surface</h1>
+      <p class="lede">Authenticate to manage encrypted secrets, application access, and recovery. Encryption at rest does not protect values after an authorized reveal.</p>
+      <form id="login-form" class="stack" novalidate>
+        <div class="field">
+          <label for="password">Owner password</label>
+          <input id="password" name="password" type="password" autocomplete="current-password" required minlength="12" aria-describedby="password-help login-error">
+          <p id="password-help" class="field-help">Password managers and paste are supported.</p>
+        </div>
+        <p id="login-error" class="form-message error" role="alert" hidden></p>
+        <button class="button primary full" type="submit">Continue with password</button>
+        <button id="passkey-login" class="button secondary full" type="button">Continue with a passkey</button>
+      </form>
+      <p class="trust-note">SMCV does not send account, vault, or secret data to a third-party service.</p>
+    </section>
+  </main>
+
+  <div id="app-view" class="app-layout" hidden>
+    <header class="topbar">
+      <button id="nav-toggle" class="icon-button mobile-only" type="button" aria-controls="primary-navigation" aria-expanded="false">
+        <span class="sr-only">Open navigation</span>
+        <span aria-hidden="true">☰</span>
+      </button>
+      <a class="brand compact" href="#overview" aria-label="SMCV overview">
+        <span class="brand-mark" aria-hidden="true">S</span>
+        <span>SMCV</span>
+      </a>
+      <div class="topbar-state">
+        <span class="status-dot" aria-hidden="true"></span>
+        <span>Vault unlocked</span>
+      </div>
+      <button id="logout" class="button quiet" type="button">Lock session</button>
+    </header>
+
+    <aside id="primary-navigation" class="sidebar" aria-label="Primary navigation">
+      <nav>
+        <a href="#overview" data-route="overview">Overview</a>
+        <a href="#secrets" data-route="secrets">Secrets</a>
+        <a href="#applications" data-route="applications">Applications</a>
+        <a href="#access" data-route="access">Access policies</a>
+        <a href="#activity" data-route="activity">Activity</a>
+        <a href="#backups" data-route="backups">Backup and recovery</a>
+        <a href="#settings" data-route="settings">Settings</a>
+      </nav>
+      <div class="sidebar-note">
+        <span class="badge neutral">Encrypted at rest</span>
+        <p>Authorized actions can decrypt values while this process is unlocked.</p>
+      </div>
+    </aside>
+
+    <main id="main-content" class="content" tabindex="-1">
+      <div id="page-status" class="sr-only" role="status" aria-live="polite"></div>
+      <div id="page"></div>
+    </main>
+  </div>
+
+  <dialog id="confirm-dialog" aria-labelledby="confirm-title" aria-describedby="confirm-description">
+    <form method="dialog" class="dialog-card">
+      <div class="eyebrow" id="confirm-level">Confirm action</div>
+      <h2 id="confirm-title">Confirm</h2>
+      <p id="confirm-description"></p>
+      <div class="dialog-actions">
+        <button class="button secondary" value="cancel">Cancel</button>
+        <button id="confirm-action" class="button danger" value="confirm">Confirm</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="global-status" class="toast" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

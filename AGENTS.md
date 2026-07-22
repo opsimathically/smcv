@@ -4,107 +4,99 @@ This file governs work in this repository.
 
 ## Read before changing the project
 
-Read, in order:
+Start with:
 
 1. `README.md`
 2. `ai_context_documentation/PROJECT_CHARTER.md`
-3. `ai_context_documentation/PRODUCT_REQUIREMENTS.md`
-4. `ai_context_documentation/DECISION_REGISTER.md`
-5. `ai_context_documentation/THREAT_AND_TRUST_MODEL.md`
-6. `ai_context_documentation/SYSTEM_ARCHITECTURE.md`
-7. The active phase plan identified by `ai_phased_plans/README.md`
+3. `ai_context_documentation/SYSTEM_ARCHITECTURE.md`
+4. `ai_context_documentation/THREAT_AND_TRUST_MODEL.md`
+5. The active phase plan in `ai_phased_plans/`
 
-For security-sensitive changes, also read:
+For user-facing changes, also read:
 
-- `ai_context_documentation/CRYPTOGRAPHY_AND_KEY_MANAGEMENT.md`
-- `ai_context_documentation/AUTHORIZATION_MODEL.md`
-- `ai_context_documentation/BACKUP_AND_RECOVERY.md`
-- `ai_context_documentation/SECURITY_ASSURANCE.md`
+- `ai_design_guidelines/PRODUCT_DESIGN_SYSTEM.md`
+- `ai_design_guidelines/CONTENT_AND_TRUST_LANGUAGE.md`
+- `ai_design_guidelines/ACCESSIBILITY.md`
+- `ai_design_guidelines/CRITICAL_USER_FLOWS.md`
 
-For user-facing changes, also read every document in
-`ai_design_guidelines/`.
+## Non-negotiable product constraints
 
-## Decision language
-
-- **Committed** decisions are requirements. Do not contradict them without an
-  explicit owner decision recorded in `DECISION_REGISTER.md`.
-- **Proposed** decisions are the default direction but must be validated at the
-  phase gate named in the decision.
-- **Deferred** work is out of the current implementation scope.
-
-Do not silently convert proposed or deferred items into committed scope.
-
-## Non-negotiable security constraints
-
-- Never commit real secrets, credentials, recovery keys, private production
-  data, or plaintext vault backups.
-- Never write plaintext secret values to logs, traces, metrics, panic messages,
-  URLs, filenames, audit records, or temporary files.
-- Do not invent cryptographic algorithms or protocols. Use reviewed primitives
-  through maintained libraries and preserve algorithm agility in stored data.
-- Keep root key material outside SQLite and outside portable backup files.
-- Treat authorization as deny-by-default. Every protected operation must pass
-  through the central policy boundary.
-- Keep authentication, authorization, encryption, persistence, backup, and
-  audit responsibilities explicit even within the modular monolith.
-- API credentials are display-once, stored only as verifiers, independently
-  revocable, expirable, and unable to increase their own authority.
-- Secret updates create immutable versions. Never silently overwrite history.
-- Backup import must authenticate and validate the complete input before
-  committing effects, and must not partially replace a live vault.
-- Do not claim protection against a fully compromised, unlocked host. Maintain
-  the documented trust boundaries.
-- Avoid unsafe Rust. Any required `unsafe` block needs a documented invariant,
-  focused tests, and security review.
+- Never commit or log plaintext secrets, credentials, session material, root
+  keys, archive keys, real recovery material, or production vault data.
+- Keep root-provider material separate from the SQLite vault database.
+- Preserve immutable secret versions and audit history. Never silently replace
+  history with a newer value or lifecycle state.
+- Route every protected operation through authentication, explicit
+  authorization, bounded input handling, and safe audit semantics.
+- Owner-only actions must never become service-policy grant actions.
+- Treat archive creation, full verification, download, off-host custody,
+  restore testing, and activation as distinct states.
+- Fresh-host browser recovery must originate from explicit local CLI authority;
+  never add a remotely claimable empty-vault bootstrap route.
+- Never place secret or recovery material in URLs, browser storage, telemetry,
+  filenames, process arguments, or unredacted errors.
+- Production browser assets must be same-origin and self-contained, with no
+  third-party executable assets, analytics, remote fonts, or service worker.
 
 ## Engineering posture
 
-- Begin as a single-node, self-hosted Rust modular monolith with SQLite on a
-  local filesystem.
-- Prefer correctness, recoverability, and simple operation over speculative
-  distributed-system complexity.
-- Keep domain logic independent of HTTP, UI, SQLite, and concrete key-provider
-  adapters.
-- Use stable Rust, a committed lockfile, reproducible commands, and the
-  smallest practical dependency set.
-- Bound inputs, concurrency, memory use, and transaction duration.
-- Make migrations forward-moving, transactional where SQLite permits, and
-  tested from every supported prior schema.
-- Use structured errors externally and preserve useful internal context without
-  including sensitive material.
+- The implementation language is Rust; use the workspace MSRV and pinned
+  dependency policy documented in the decision register.
+- Begin and remain a single-node modular monolith unless a later committed
+  decision changes that boundary.
+- SQLite is the v1 source of truth; application-level authenticated encryption
+  protects sensitive records before persistence.
+- Keep identity/session, authorization, vault, backup/recovery, audit,
+  persistence, HTTP, web, and local CLI recovery responsibilities explicit.
+- All mutations use concurrency preconditions or idempotency where retry could
+  otherwise duplicate or overwrite effects.
+- Bound attacker-controlled work before expensive password, KDF, archive,
+  allocation, database, or WebAuthn processing.
+- Avoid distributed-system complexity until a measured requirement and a
+  committed architecture change warrant it.
 
 ## Change workflow
 
-- Work only within the active phase acceptance scope.
+- Work from the current phase plan and keep changes within its acceptance
+  scope while continuing automatically across non-blocking phase boundaries.
+- Use `human_tasks/` only for an account, key, external authority, policy
+  decision, or owner action that cannot safely be performed with synthetic
+  material.
+- Add reproducible phase evidence to `ai_phase_evidence/` and never include
+  real protected material in it.
+- Update durable context and the decision register when product intent,
+  security boundaries, architecture, or compatibility behavior changes.
 - Preserve unrelated user changes in a dirty worktree.
-- Put optional or post-development owner actions in `human_tasks/`; never put
-  credential values there and never use a human task as a Phase 0–6 gate.
-- Do not create pilot, beta, early-access, external-user-validation, adoption,
-  or owner-approval gates. Phases 0–6 are one continuous implementation goal.
-- Treat phase gates as self-verified evidence checkpoints. If a criterion or
-  review fails, keep the goal active, repair the defect, retest, and continue.
-- Prefer local and synthetic substitutes over waiting for an external account,
-  domain, certificate, KMS/HSM, signing identity, production infrastructure, or
-  reviewer. Those items cannot block the v1 release candidate unless the owner
-  explicitly changes D-012 through D-016.
-- Record verification evidence in `ai_phase_evidence/` using its README.
-- Update durable documentation when a decision, invariant, data format, threat,
-  or operational behavior changes.
-- Run formatting, linting, unit and integration tests, migration checks,
-  dependency review, documentation link checks, and security checks relevant
-  to the changed area.
+- Run formatting, strict linting, tests, documentation checks, dependency
+  policy checks, secret scans, and relevant browser checks before declaring a
+  phase complete.
+- Make local commits at completed phase boundaries; do not push unless the
+  owner explicitly requests it.
 
 ## Definition of done
 
-Code existence is insufficient. A phase or slice is complete only when:
+A phase or slice is not complete merely because code exists. Completion needs:
 
-- Its acceptance criteria and negative cases pass.
-- Tests are proportional to security and recovery risk.
-- Failure, restart, and rollback behavior has been exercised.
-- Authorization denials and secret non-disclosure are verified.
-- Backup or migration compatibility is demonstrated when applicable.
-- Accessibility is checked for user-facing changes.
-- Security-sensitive dependencies and `unsafe` usage are reviewed.
-- Evidence and durable documentation match the delivered behavior.
-- The phase-close evidence passes and the active phase pointer advances without
-  requiring owner approval.
+- Acceptance criteria satisfied and requirement coverage recorded.
+- Automated tests proportional to risk, including negative and interruption
+  behavior.
+- Operational behavior observed, including retry, restart, cleanup, and
+  recovery paths.
+- Plaintext/ciphertext, authorization, browser storage/DOM/cache, and audit
+  invariants demonstrated with synthetic records.
+- Accessibility checks for every supported user-facing workflow.
+- Security, dependency, and secret-handling review with adversarial findings
+  resolved or explicitly accepted under the project rules.
+- Evidence recorded according to `ai_phase_evidence/README.md`.
+- Documentation updated to match delivered behavior.
+
+## Documentation conventions
+
+- State whether a choice is **committed**, **proposed**, or **deferred**.
+- Use calendar dates for time-sensitive reviews.
+- Use the exact trust-language distinctions in
+  `ai_design_guidelines/CONTENT_AND_TRUST_LANGUAGE.md`.
+- Never call a backup successful before post-write verification, and never
+  imply that current-vault purge erases prior backups or storage remnants.
+- Keep human task status and credential metadata current, but never include a
+  credential or recovery value.

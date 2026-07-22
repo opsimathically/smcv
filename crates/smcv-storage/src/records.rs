@@ -275,6 +275,8 @@ pub struct SecretRecord {
     pub schedule: SecretSchedule,
     /// Stored keyed commitment over integrity-sensitive clear state.
     pub state_commitment: [u8; 32],
+    /// Tombstone time when the lifecycle state is deleted.
+    pub deleted_at_unix_ms: Option<i64>,
 }
 
 /// Opaque current-version schedule returned by the due-work query.
@@ -772,7 +774,7 @@ impl SqliteStore {
                 r"SELECT namespace_id, name_index, lifecycle_state, current_version, revision,
                           metadata_version, metadata_nonce, metadata_ciphertext,
                           metadata_dek_nonce, metadata_wrapped_dek, metadata_kek_version,
-                          state_commitment,
+                          state_commitment, deleted_at_unix_ms,
                           (SELECT expires_at_unix_ms FROM smcv_secret_versions
                             WHERE secret_id = smcv_secrets.secret_id AND version = current_version),
                           (SELECT rotation_due_at_unix_ms FROM smcv_secret_versions
@@ -795,6 +797,7 @@ impl SqliteStore {
                         row.get::<_, Vec<u8>>(11)?,
                         row.get::<_, Option<i64>>(12)?,
                         row.get::<_, Option<i64>>(13)?,
+                        row.get::<_, Option<i64>>(14)?,
                     ))
                 },
             )
@@ -815,7 +818,25 @@ impl SqliteStore {
         after_secret_id: Option<SecretId>,
         limit: u16,
     ) -> StorageResult<Vec<SecretRecord>> {
+        self.secrets_in_lifecycle_after(namespace_id, "active", after_secret_id, limit)
+    }
+
+    /// Lists a bounded stable page in one validated lifecycle state.
+    ///
+    /// # Errors
+    ///
+    /// Returns invalid data for an unsupported state or zero page size.
+    pub fn secrets_in_lifecycle_after(
+        &self,
+        namespace_id: NamespaceId,
+        lifecycle_state: &str,
+        after_secret_id: Option<SecretId>,
+        limit: u16,
+    ) -> StorageResult<Vec<SecretRecord>> {
         if limit == 0 {
+            return Err(StorageError::InvalidData);
+        }
+        if !matches!(lifecycle_state, "active" | "archived" | "deleted") {
             return Err(StorageError::InvalidData);
         }
         let after = after_secret_id.map_or([0_u8; 16], |id| *id.as_bytes());
@@ -824,11 +845,16 @@ impl SqliteStore {
             let mut statement = connection.prepare(
                 r"SELECT secret_id FROM smcv_secrets
                   WHERE namespace_id = ?1 AND secret_id > ?2
-                    AND lifecycle_state = 'active'
-                  ORDER BY secret_id ASC LIMIT ?3",
+                    AND lifecycle_state = ?3
+                  ORDER BY secret_id ASC LIMIT ?4",
             )?;
             let rows = statement.query_map(
-                params![namespace_id.as_bytes(), after.as_slice(), i64::from(limit)],
+                params![
+                    namespace_id.as_bytes(),
+                    after.as_slice(),
+                    lifecycle_state,
+                    i64::from(limit)
+                ],
                 |row| row.get::<_, Vec<u8>>(0),
             )?;
             let mut ids = Vec::with_capacity(usize::from(limit));
@@ -859,7 +885,7 @@ impl SqliteStore {
                 r"SELECT secret_id, name_index, lifecycle_state, current_version, revision,
                           metadata_version, metadata_nonce, metadata_ciphertext,
                           metadata_dek_nonce, metadata_wrapped_dek, metadata_kek_version,
-                          state_commitment,
+                          state_commitment, deleted_at_unix_ms,
                           (SELECT expires_at_unix_ms FROM smcv_secret_versions
                             WHERE secret_id = smcv_secrets.secret_id AND version = current_version),
                           (SELECT rotation_due_at_unix_ms FROM smcv_secret_versions
@@ -882,6 +908,7 @@ impl SqliteStore {
                         row.get::<_, Vec<u8>>(11)?,
                         row.get::<_, Option<i64>>(12)?,
                         row.get::<_, Option<i64>>(13)?,
+                        row.get::<_, Option<i64>>(14)?,
                     ))
                 },
             )
@@ -903,6 +930,7 @@ impl SqliteStore {
                 row.11,
                 row.12,
                 row.13,
+                row.14,
             );
             parse_secret(secret_id, raw)
         })
@@ -1307,6 +1335,7 @@ type RawSecret = (
     Vec<u8>,
     Option<i64>,
     Option<i64>,
+    Option<i64>,
 );
 
 fn parse_secret(secret_id: SecretId, row: RawSecret) -> StorageResult<SecretRecord> {
@@ -1323,6 +1352,7 @@ fn parse_secret(secret_id: SecretId, row: RawSecret) -> StorageResult<SecretReco
         wrapped,
         kek,
         state_commitment,
+        deleted_at_unix_ms,
         expires_at_unix_ms,
         rotation_due_at_unix_ms,
     ) = row;
@@ -1344,6 +1374,7 @@ fn parse_secret(secret_id: SecretId, row: RawSecret) -> StorageResult<SecretReco
         state_commitment: state_commitment
             .try_into()
             .map_err(|_| StorageError::InvalidData)?,
+        deleted_at_unix_ms,
     })
 }
 

@@ -243,6 +243,39 @@ impl SqliteStore {
         })
     }
 
+    /// Lists a bounded stable page of service identities by opaque ID.
+    pub fn service_identities_after(
+        &self,
+        after_principal_id: Option<PrincipalId>,
+        limit: u16,
+    ) -> StorageResult<Vec<ServiceIdentityRecord>> {
+        if limit == 0 {
+            return Err(StorageError::InvalidData);
+        }
+        let after = after_principal_id.map_or([0_u8; 16], |id| *id.as_bytes());
+        let ids = {
+            let connection = self.lock()?;
+            let mut statement = connection.prepare(
+                r"SELECT s.principal_id
+                     FROM smcv_service_identities AS s
+                     JOIN smcv_principals AS p ON p.principal_id = s.principal_id
+                    WHERE s.principal_id > ?1 AND p.principal_kind = 'service'
+                    ORDER BY s.principal_id LIMIT ?2",
+            )?;
+            let rows = statement.query_map(params![after.as_slice(), i64::from(limit)], |row| {
+                row.get::<_, Vec<u8>>(0)
+            })?;
+            let mut ids = Vec::with_capacity(usize::from(limit));
+            for row in rows {
+                ids.push(PrincipalId::from_uuid(parse_uuid(&row?)?));
+            }
+            ids
+        };
+        ids.into_iter()
+            .map(|id| self.service_identity(id))
+            .collect()
+    }
+
     /// Returns the one owner principal when enrollment has completed.
     pub fn owner_principal(&self) -> StorageResult<Option<PrincipalRecord>> {
         let connection = self.lock()?;

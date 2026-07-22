@@ -33,6 +33,8 @@ Last reviewed: 2026-07-21
 | D-108 | `.smcvault` v1 uses a bounded public header, a random wrapped archive DEK, ordered XChaCha20-Poly1305 frames, and an authenticated final logical-stream commitment. | Phase 3 parser properties and wrong-key, corruption, prefix, extension, duplicate, reorder, and downgrade tests fail closed; the byte format is published. |
 | D-109 | Preserve imported application credential verifiers and their portable vault-scoped verifier key by default for disaster recovery; offer explicit revocation for migration. | Phase 3 clean-host tests prove preserved credentials authenticate and revoke mode invalidates them before activation without exporting raw tokens. |
 | D-110 | Preserve logical vault identity across disaster recovery while generating a new installation ID and incremented recovery epoch. | Phase 3 restore re-encrypts destination-bound envelopes, begins a new audit segment, and exposes the clone/decommission warning. |
+| D-111 | Ship the owner UI as embedded, no-build, same-origin semantic HTML/CSS/ES modules with no third-party runtime assets or browser persistence. | Phase 4 keeps the Rust API as the authority boundary, permits a strict nonce-free CSP, and reduces client supply-chain and secret-retention surface. |
+| D-112 | Fresh-host browser recovery exists only as a CLI-minted, loopback-only, ten-minute, single-use channel. The CLI displays a clean URL plus a separate body-submitted authorization code; the process retains only code/session digests. | Phase 4 provides accessible local recovery without putting authority in a URL or introducing a remotely claimable empty-vault bootstrap endpoint. |
 
 ## Proposed: validate in Phase 0 or named phase
 

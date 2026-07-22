@@ -1,6 +1,6 @@
 # Critical user flows
 
-Status: **Committed outcomes; interaction details proposed**
+Status: **Committed and implemented Phase 4 interactions**
 Last reviewed: 2026-07-21
 
 ## Initialize and establish recovery

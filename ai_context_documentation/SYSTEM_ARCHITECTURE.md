@@ -1,6 +1,6 @@
 # System architecture
 
-Status: **Committed architecture; Phases 0–2 implemented**
+Status: **Committed architecture; Phases 0–4 implemented**
 Last reviewed: 2026-07-21
 
 ## Architecture summary
@@ -96,11 +96,17 @@ bounded input types, but not convenience access that bypasses authorization.
 - Gives long-running backup/restore jobs durable bounded state so a browser
   disconnect does not change completion semantics; encrypted download artifacts
   have quotas and expiry.
+- Embeds a no-build semantic HTML/CSS/ES-module owner interface in the Rust
+  binary. It loads no third-party runtime asset, uses no service worker or
+  browser persistence, and treats `/api/v1` as the sole product authority
+  boundary.
 
 ### SMCV CLI
 
 - Initializes and diagnoses a local installation.
 - Creates, verifies, inspects, and restores backups.
+- Can mint a ten-minute, single-use loopback browser recovery adapter without
+  adding a bootstrap route to the ordinary server.
 - Performs explicit maintenance and key operations.
 - Prompts for secrets using protected terminal input; secret inputs are not
   accepted in command arguments.

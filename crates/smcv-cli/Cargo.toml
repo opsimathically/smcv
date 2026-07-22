@@ -6,12 +6,25 @@ rust-version.workspace = true
 publish.workspace = true
 
 [dependencies]
+axum.workspace = true
 clap.workspace = true
+getrandom.workspace = true
+hex.workspace = true
 rpassword.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
 smcv-app = { version = "=0.1.0", path = "../smcv-app" }
 smcv-backup = { version = "=0.1.0", path = "../smcv-backup" }
 smcv-core = { version = "=0.1.0", path = "../smcv-core" }
+subtle.workspace = true
+tokio.workspace = true
+uuid.workspace = true
 zeroize.workspace = true
 
 [lints]
 workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tower.workspace = true

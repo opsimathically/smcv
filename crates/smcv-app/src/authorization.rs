@@ -62,6 +62,29 @@ pub struct PolicyDetails {
     pub revision: u64,
 }
 
+/// Owner-visible rule attached to one policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PolicyGrantSummary {
+    pub grant_id: GrantId,
+    pub action: Action,
+    pub resource_kind: ResourceKind,
+    pub resource_id: ObjectId,
+    pub include_descendants: bool,
+}
+
+/// Owner-visible service binding attached to one policy.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PolicyBindingSummary {
+    pub principal_id: PrincipalId,
+}
+
+/// Complete safe rule inventory for one authenticated policy revision.
+pub struct PolicyRuleSet {
+    pub authorization_revision: u64,
+    pub grants: Vec<PolicyGrantSummary>,
+    pub bindings: Vec<PolicyBindingSummary>,
+}
+
 impl core::fmt::Debug for PolicyDetails {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
@@ -652,6 +675,124 @@ impl InitializedVault {
             label,
             state: policy.state,
             revision: policy.revision,
+        })
+    }
+
+    /// Lists a bounded stable page of policies with protected display labels.
+    ///
+    /// # Errors
+    ///
+    /// Returns denied for stale owner authority, invalid input for page bounds,
+    /// and integrity failure for any graph or metadata mismatch.
+    pub fn policies(
+        &self,
+        owner: AuthenticatedOwner,
+        after_policy_id: Option<PolicyId>,
+        limit: u16,
+        request_id: RequestId,
+        now_unix_ms: i64,
+    ) -> Result<Vec<PolicyDetails>, AuthorizationError> {
+        if !(1..=100).contains(&limit) {
+            return Err(AuthorizationError::InvalidInput);
+        }
+        let _gate = self
+            .authorization_gate
+            .read()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        crate::authentication::verify_owner_context_active(self, owner, now_unix_ms)
+            .map_err(|_| AuthorizationError::Denied)?;
+        self.authorize(
+            RequestPrincipal::Owner(owner),
+            Action::PolicyRead,
+            ResourceKind::Namespace,
+            ObjectId::from_uuid(self.vault_id.as_uuid()),
+            request_id,
+            now_unix_ms,
+        )?;
+        let snapshot = self.verified_authorization_snapshot()?;
+        let mut details = Vec::with_capacity(usize::from(limit));
+        for policy in snapshot
+            .policies
+            .into_iter()
+            .filter(|policy| after_policy_id.is_none_or(|after| policy.policy_id > after))
+            .take(usize::from(limit))
+        {
+            let plaintext = self
+                .decrypt_record(
+                    &policy.metadata,
+                    ObjectKind::PolicyMetadata,
+                    ObjectKind::WrappedPolicyMetadataKey,
+                    ObjectId::from_uuid(policy.policy_id.as_uuid()),
+                    policy.metadata_version,
+                )
+                .map_err(|_| AuthorizationError::Integrity)?;
+            details.push(PolicyDetails {
+                policy_id: policy.policy_id,
+                label: decode_policy_label(&plaintext)?,
+                state: policy.state,
+                revision: policy.revision,
+            });
+        }
+        Ok(details)
+    }
+
+    /// Reads the exact grants and service bindings for one policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns a uniform denial for absent policy state and fails closed for
+    /// stale owner or graph integrity failures.
+    pub fn policy_rules(
+        &self,
+        owner: AuthenticatedOwner,
+        policy_id: PolicyId,
+        request_id: RequestId,
+        now_unix_ms: i64,
+    ) -> Result<PolicyRuleSet, AuthorizationError> {
+        let _gate = self
+            .authorization_gate
+            .read()
+            .map_err(|_| AuthorizationError::Unavailable)?;
+        crate::authentication::verify_owner_context_active(self, owner, now_unix_ms)
+            .map_err(|_| AuthorizationError::Denied)?;
+        self.authorize(
+            RequestPrincipal::Owner(owner),
+            Action::PolicyRead,
+            ResourceKind::Namespace,
+            ObjectId::from_uuid(self.vault_id.as_uuid()),
+            request_id,
+            now_unix_ms,
+        )?;
+        let snapshot = self.verified_authorization_snapshot()?;
+        if !snapshot
+            .policies
+            .iter()
+            .any(|policy| policy.policy_id == policy_id)
+        {
+            return Err(AuthorizationError::Denied);
+        }
+        Ok(PolicyRuleSet {
+            authorization_revision: snapshot.state.revision,
+            grants: snapshot
+                .grants
+                .into_iter()
+                .filter(|grant| grant.policy_id == policy_id)
+                .map(|grant| PolicyGrantSummary {
+                    grant_id: grant.grant_id,
+                    action: grant.action,
+                    resource_kind: grant.resource_kind,
+                    resource_id: grant.resource_id,
+                    include_descendants: grant.include_descendants,
+                })
+                .collect(),
+            bindings: snapshot
+                .bindings
+                .into_iter()
+                .filter(|binding| binding.policy_id == policy_id)
+                .map(|binding| PolicyBindingSummary {
+                    principal_id: binding.principal_id,
+                })
+                .collect(),
         })
     }
 
@@ -1364,6 +1505,17 @@ mod tests {
                 1_800_000_006_000,
             )
             .unwrap_or_else(|error| panic!("synthetic policy must create: {error}"));
+        let policy_inventory = vault
+            .policies(owner, None, 100, RequestId::random(), 1_800_000_006_500)
+            .unwrap_or_else(|error| panic!("policy inventory must read: {error}"));
+        assert_eq!(policy_inventory.len(), 1);
+        assert_eq!(policy_inventory[0].policy_id, policy);
+        assert_eq!(policy_inventory[0].label.expose(), "exact read");
+        let empty_rules = vault
+            .policy_rules(owner, policy, RequestId::random(), 1_800_000_006_600)
+            .unwrap_or_else(|error| panic!("empty policy rules must read: {error}"));
+        assert!(empty_rules.grants.is_empty());
+        assert!(empty_rules.bindings.is_empty());
         vault
             .add_policy_grant(
                 owner,
@@ -1415,6 +1567,12 @@ mod tests {
                 1_800_000_008_000,
             )
             .unwrap_or_else(|error| panic!("synthetic binding must create: {error}"));
+        let populated_rules = vault
+            .policy_rules(owner, policy, RequestId::random(), 1_800_000_008_050)
+            .unwrap_or_else(|error| panic!("populated policy rules must read: {error}"));
+        assert_eq!(populated_rules.grants.len(), 3);
+        assert_eq!(populated_rules.bindings.len(), 1);
+        assert_eq!(populated_rules.bindings[0].principal_id, service);
         let writer = vault
             .create_service_identity(
                 owner,

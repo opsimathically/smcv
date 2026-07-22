@@ -6,9 +6,9 @@ encrypted secrets and gives applications narrowly scoped, revocable API
 access to only the secrets and operations they require.
 
 The project is under active implementation. The encrypted vault core,
-authenticated `/api/v1` surface, and portable backup/recovery tooling are
-complete; the owner web interface remains under implementation, so it is not
-production-ready.
+authenticated `/api/v1` surface, portable backup/recovery tooling, and owner
+web interface are complete. Operational packaging and release-candidate
+hardening remain, so it is not production-ready.
 
 ## Committed product direction
 
@@ -38,10 +38,11 @@ production-ready.
 The documentation foundation, [Phase 0 engineering
 baseline](ai_phase_evidence/PHASE_0_EXIT_REPORT.md), [Phase 1 encrypted vault
 core](ai_phase_evidence/PHASE_1_EXIT_REPORT.md), [Phase 2 authenticated
-API](ai_phase_evidence/PHASE_2_EXIT_REPORT.md), and [Phase 3 portable backup and
-recovery](ai_phase_evidence/PHASE_3_EXIT_REPORT.md) passed their adversarial
-evidence gates on 2026-07-21. [Phase 4 web product and
-accessibility](ai_phased_plans/PHASE_04_WEB_UI.md) is active. Run the complete
+API](ai_phase_evidence/PHASE_2_EXIT_REPORT.md), [Phase 3 portable backup and
+recovery](ai_phase_evidence/PHASE_3_EXIT_REPORT.md), and [Phase 4 web product
+and accessibility](ai_phase_evidence/PHASE_4_EXIT_REPORT.md) passed their
+adversarial evidence gates on 2026-07-21. [Phase 5 operations and
+hardening](ai_phased_plans/PHASE_05_OPERATIONS.md) is active. Run the complete
 local verification gate with:
 
 ```sh

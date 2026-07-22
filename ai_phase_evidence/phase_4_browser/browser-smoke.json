@@ -1,0 +1,74 @@
+{
+  "date": "2026-07-22T08:57:08.648Z",
+  "browser": "152.0.6",
+  "platform": "linux",
+  "checks": {
+    "absentBeforeReveal": true,
+    "presentAfterReveal": true,
+    "absentAfterHide": true,
+    "absentAfterNavigation": true,
+    "browserStorageEmpty": true,
+    "visibleControlsNamed": true,
+    "skipLinkNamed": true,
+    "oneVisiblePageHeading": true,
+    "accessibilityTreeNames": true,
+    "reflowNarrow": true,
+    "reflowWide": true,
+    "reducedMotionApplied": true,
+    "keyboardEntersPageActions": true,
+    "twoXScaleNoOverflow": true
+  },
+  "accessibility": {
+    "login": {
+      "skip": {
+        "role": "link",
+        "name": "Skip to authentication"
+      },
+      "password": {
+        "role": "",
+        "name": "Owner password"
+      },
+      "submit": {
+        "role": "button",
+        "name": "Continue with password"
+      }
+    },
+    "backups": {
+      "heading": {
+        "role": "heading",
+        "name": "Backup and recovery"
+      },
+      "create": {
+        "role": "button",
+        "name": "Create backup"
+      },
+      "verify": {
+        "role": "button",
+        "name": "Verify existing backup"
+      }
+    }
+  },
+  "layout": {
+    "narrow": {
+      "innerWidth": 500,
+      "scrollWidth": 488,
+      "localStorage": 0,
+      "sessionStorage": 0,
+      "unlabeledControls": 0,
+      "unnamedButtons": 0,
+      "h1Count": 1,
+      "reducedMotion": true,
+      "sidebarMotion": "0.000001s"
+    },
+    "wide": {
+      "innerWidth": 1280,
+      "scrollWidth": 1268
+    },
+    "zoomed": {
+      "devicePixelRatio": 2,
+      "innerWidth": 640,
+      "scrollWidth": 640
+    }
+  },
+  "screenReader": null
+}

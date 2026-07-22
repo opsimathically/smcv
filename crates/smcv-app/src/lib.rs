@@ -22,7 +22,8 @@ pub use authentication::{
     AuthenticatedOwner, AuthenticationError, BrowserSessionSecrets, LocalSetupCapability,
 };
 pub use authorization::{
-    AuthorizationError, EffectiveAccessDelta, PolicyDetails, PolicyMetadata, RequestPrincipal,
+    AuthorizationError, EffectiveAccessDelta, PolicyBindingSummary, PolicyDetails,
+    PolicyGrantSummary, PolicyMetadata, PolicyRuleSet, RequestPrincipal,
 };
 pub use authorized_vault::{AuthorizedVault, AuthorizedVaultError, IdempotencyInput};
 pub use backup::{BackupError, BackupFileReport, CredentialRestoreMode, RestoreReport};
@@ -31,7 +32,7 @@ pub use passkeys::{PasskeyChallenge, PasskeyService};
 pub use rotation::{RootRotationOutcome, RotationProgress};
 pub use service_identity::{
     ApplicationCredentialSummary, AuthenticatedService, IssuedApplicationCredential,
-    ServiceIdentityMetadata,
+    ServiceIdentityMetadata, ServiceIdentitySummary,
 };
 pub use vault_core::{
     AuditVerification, DecryptedMetadata, DueSecret, MetadataInput, NamespaceListItem,

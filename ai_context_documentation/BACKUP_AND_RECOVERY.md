@@ -1,6 +1,6 @@
 # Backup and recovery
 
-Status: **Delivered non-web core; Phase 4 browser workflows active**
+Status: **Delivered core and Phase 4 browser workflows**
 Last reviewed: 2026-07-21
 
 ## Recovery promise
@@ -234,6 +234,26 @@ It may perform the complete restore or mint a short-lived, single-use,
 loopback/local-socket recovery channel for an accessible browser flow. That
 channel is never logged, never exposed on a non-loopback listener, expires
 quickly, and is consumed atomically.
+
+The delivered browser ceremony is started with:
+
+```sh
+smcv backup-restore-browser \
+  --database /new/data/vault.sqlite \
+  --root-key /separate/provider/root.key
+```
+
+The CLI displays—not logs—a clean one-use URL and a separate random
+authorization code. Browser code submits the code once in a protected request
+body, clears the field, and receives an HttpOnly, SameSite-strict loopback
+session cookie; neither value enters a URL, browser storage, or history. The
+local process stores only their digests, accepts only the exact loopback
+origin, keeps uploaded encrypted bytes in a restrictive random workspace,
+holds supplied recovery material only in zeroizing process memory between
+authenticated review and activation, and closes after one activation attempt
+or ten minutes. Activation retains the source owner password verifier,
+disables source-bound passkeys, reports their reenrollment count, and offers
+explicit preserve-or-revoke handling for application credentials.
 
 Possession of an archive and its key is necessary but does not by itself open a
 public remote bootstrap endpoint. The destination ceremony establishes the

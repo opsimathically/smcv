@@ -136,6 +136,30 @@ impl AuthorizedVault<'_> {
             .map_err(Into::into)
     }
 
+    /// Lists archived or deleted secrets for owner lifecycle administration.
+    ///
+    /// # Errors
+    /// Returns a uniform authorization or safe domain error.
+    pub fn list_secrets_in_lifecycle(
+        &self,
+        namespace_id: NamespaceId,
+        lifecycle_state: &str,
+        after_secret_id: Option<SecretId>,
+        limit: u16,
+    ) -> Result<Vec<SecretListItem>, AuthorizedVaultError> {
+        self.authorize(
+            Action::SecretList,
+            ResourceKind::Namespace,
+            ObjectId::from_uuid(namespace_id.as_uuid()),
+        )?;
+        if !matches!(self.principal, RequestPrincipal::Owner(_)) {
+            return Err(AuthorizationError::Denied.into());
+        }
+        self.vault
+            .list_secrets_in_lifecycle(namespace_id, lifecycle_state, after_secret_id, limit)
+            .map_err(Into::into)
+    }
+
     /// Creates a namespace after owner-only centralized authorization.
     ///
     /// # Errors

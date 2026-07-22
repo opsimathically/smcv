@@ -122,6 +122,10 @@ pub struct SecretListItem {
     pub current_version: u64,
     /// Optimistic revision.
     pub revision: u64,
+    /// Explicit lifecycle state represented by this inventory page.
+    pub lifecycle_state: String,
+    /// Tombstone time for deleted records.
+    pub deleted_at_unix_ms: Option<i64>,
 }
 
 /// Safe due-state for one active current secret version.
@@ -835,9 +839,29 @@ impl InitializedVault {
         if namespace.lifecycle_state != "active" {
             return Err(VaultError::NotFound);
         }
+        self.list_secrets_in_lifecycle(namespace_id, "active", after_secret_id, limit)
+    }
+
+    pub(crate) fn list_secrets_in_lifecycle(
+        &self,
+        namespace_id: NamespaceId,
+        lifecycle_state: &str,
+        after_secret_id: Option<SecretId>,
+        limit: u16,
+    ) -> Result<Vec<SecretListItem>, VaultError> {
+        if !(1..=100).contains(&limit)
+            || !matches!(lifecycle_state, "active" | "archived" | "deleted")
+        {
+            return Err(VaultError::InvalidInput);
+        }
+        let namespace = self.store.namespace(namespace_id).map_err(map_storage)?;
+        self.verify_namespace_state(&namespace)?;
+        if namespace.lifecycle_state != "active" {
+            return Err(VaultError::NotFound);
+        }
         let records = self
             .store
-            .secrets_after(namespace_id, after_secret_id, limit)
+            .secrets_in_lifecycle_after(namespace_id, lifecycle_state, after_secret_id, limit)
             .map_err(map_storage)?;
         let mut items = Vec::with_capacity(records.len());
         for record in records {
@@ -847,6 +871,8 @@ impl InitializedVault {
                 metadata: self.decrypt_metadata(&record)?,
                 current_version: record.current_version,
                 revision: record.revision,
+                lifecycle_state: record.lifecycle_state,
+                deleted_at_unix_ms: record.deleted_at_unix_ms,
             });
         }
         Ok(items)
@@ -1961,6 +1987,10 @@ mod tests {
     }
 
     #[test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the lifecycle test keeps the ordered active/archive/restore/delete/purge proof together"
+    )]
     fn lifecycle_and_purge_require_revision_retention_and_explicit_capability() {
         let directory =
             TempDir::new().unwrap_or_else(|error| panic!("synthetic directory must open: {error}"));
@@ -1980,12 +2010,30 @@ mod tests {
             )
             .unwrap_or_else(|error| panic!("synthetic secret must create: {error}"));
 
+        let active = vault
+            .list_secrets(namespace, None, 10)
+            .unwrap_or_else(|error| panic!("active inventory must load: {error}"));
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].lifecycle_state, "active");
+        assert_eq!(active[0].deleted_at_unix_ms, None);
+
         assert_eq!(
             vault
                 .archive_secret(created.secret_id, 1, operation(3))
                 .unwrap_or_else(|error| panic!("synthetic secret must archive: {error}")),
             2
         );
+        assert!(
+            vault
+                .list_secrets(namespace, None, 10)
+                .unwrap_or_else(|error| panic!("active inventory must load: {error}"))
+                .is_empty()
+        );
+        let archived = vault
+            .list_secrets_in_lifecycle(namespace, "archived", None, 10)
+            .unwrap_or_else(|error| panic!("archived inventory must load: {error}"));
+        assert_eq!(archived.len(), 1);
+        assert_eq!(archived[0].lifecycle_state, "archived");
         assert!(matches!(
             vault.reveal_current_secret(created.secret_id, operation(4)),
             Err(VaultError::NotFound)
@@ -1998,10 +2046,22 @@ mod tests {
         );
         assert_eq!(
             vault
+                .list_secrets(namespace, None, 10)
+                .unwrap_or_else(|error| panic!("restored inventory must load: {error}"))
+                .len(),
+            1
+        );
+        assert_eq!(
+            vault
                 .delete_secret(created.secret_id, 3, operation(100))
                 .unwrap_or_else(|error| panic!("synthetic secret must delete: {error}")),
             4
         );
+        let deleted = vault
+            .list_secrets_in_lifecycle(namespace, "deleted", None, 10)
+            .unwrap_or_else(|error| panic!("deleted inventory must load: {error}"));
+        assert_eq!(deleted.len(), 1);
+        assert_eq!(deleted[0].deleted_at_unix_ms, Some(100));
         assert!(matches!(
             vault.purge_secret_after_owner_approval(
                 created.secret_id,

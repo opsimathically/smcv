@@ -1,6 +1,6 @@
 # API design
 
-Status: **Committed Phase 2 API and Phase 3 backup jobs**
+Status: **Committed Phase 2 API, Phase 3 backup jobs, and Phase 4 browser adapters**
 Last reviewed: 2026-07-21
 
 ## General contract
@@ -34,16 +34,28 @@ conformance test commit these route families:
 | Policies and effective access | `/api/v1/policies`, `/api/v1/service-identities/{id}/effective-access` |
 | Audit events | `/api/v1/audit-events` |
 | Backup creation and safe metadata | `/api/v1/backups` |
-| Restore staging/status (Phase 4 local-channel work) | `/api/v1/restores` |
+| Existing-backup verification and clean restore drill | `/api/v1/backup-verifications` |
 | Session and recent authentication | `/api/v1/session` |
 
 Phase 2 also commits namespace move-impact and confirmed-move, immutable
 historical value, passkey ceremony, credential revocation, and OpenAPI
 subresources. Phase 3 adds owner-authorized backup create/status/download/delete
 routes after their format and job semantics pass the portable-recovery gate.
-Fresh-host restore remains a local CLI operation until Phase 4 introduces a
-CLI-authorized single-use loopback channel; there is no network first-claim
-route.
+Phase 4 adds a recent-owner-authorized streaming multipart verification route.
+It stores the encrypted upload restrictively, runs full verification plus a
+clean staging restore exercise, and removes both temporary archive and staging
+vault before responding.
+
+Fresh-host browser restore is deliberately outside the normal server router.
+`smcv backup-restore-browser` creates an ephemeral `/api/recovery/*` adapter on
+a random loopback port. The CLI displays a clean URL and a separate 256-bit
+authorization code. The browser submits that code once in a protected body,
+clears its input, and receives an HttpOnly, SameSite-strict loopback session
+cookie. The process holds only code and session digests; the channel expires
+after ten minutes and is consumed by one activation attempt. The next request
+streams and authenticates the archive; the final request confirms its
+authenticated ID and preserve-or-revoke credential choice before atomic
+activation. There is no network first-claim route.
 
 High-risk operations use action-shaped subresources when ordinary CRUD would
 hide important semantics, such as reveal, revoke, verify, or restore.
@@ -119,9 +131,13 @@ Phase 2 derives source limits from the TCP peer rather than forwarding headers:
 password attempts are limited to 10 per peer per minute, bearer requests to
 120, tracked source cardinality to 4,096, password work to four concurrent
 Argon2id jobs, all requests to 128 concurrent operations, headers to 64/32 KiB,
-bodies to 1 MiB, and request time to 15 seconds. Phase 5 calibrates production
-limits and proxy deployment rules. Saturation returns a safe rate-limit or
-timeout response.
+bodies to 1 MiB, and request time to 15 seconds. The authenticated archive
+verification and local recovery upload routes explicitly override those body
+and time bounds up to the documented 8 GiB web-import limit and 15-minute
+operation window; archive framing enforces its own tighter structural bounds.
+Expensive online backup and verification work shares a four-slot semaphore.
+Phase 5 calibrates production limits and proxy deployment rules. Saturation
+returns a safe rate-limit or timeout response.
 
 ## Browser security
 

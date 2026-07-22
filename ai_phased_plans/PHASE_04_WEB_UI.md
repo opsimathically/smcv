@@ -1,6 +1,6 @@
 # Phase 4: web product and accessibility
 
-Status: **Active implementation phase**
+Status: **Passed 2026-07-21; Phase 5 active**
 
 ## Objective
 
@@ -85,3 +85,10 @@ workflow without increasing secret exposure in the browser.
 WEB requirements and the web-owned portions of backup requirements pass, no
 serious accessibility or high security finding remains, and the UI accurately
 communicates the underlying trust model.
+
+## Exit result
+
+Passed. See the [Phase 4 exit
+report](../ai_phase_evidence/PHASE_4_EXIT_REPORT.md), [accessibility
+report](../ai_phase_evidence/PHASE_4_ACCESSIBILITY_REPORT.md), and [adversarial
+review](../ai_context_documentation/reviews/PHASE_4_ADVERSARIAL_REVIEW.md).

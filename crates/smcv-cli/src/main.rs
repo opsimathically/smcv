@@ -16,6 +16,8 @@ use smcv_backup::{ArchiveKey, KeyMode, RecoveryKey};
 use smcv_core::{ProtectedString, RequestId};
 use zeroize::Zeroizing;
 
+mod recovery_web;
+
 #[derive(Debug, Parser)]
 #[command(name = "smcv", version, about = "SMCV administrative CLI")]
 struct Cli {
@@ -44,6 +46,9 @@ enum Command {
         /// External root-key path in a distinct restrictive directory.
         #[arg(long)]
         root_key: PathBuf,
+        /// Read the owner password from an already-open protected file descriptor.
+        #[arg(long, value_name = "FD")]
+        password_fd: Option<u32>,
     },
     /// Enrolls a destination password after local archive recovery when none is active.
     RecoverOwner {
@@ -51,6 +56,9 @@ enum Command {
         database: PathBuf,
         #[arg(long)]
         root_key: PathBuf,
+        /// Read the new password from an already-open protected file descriptor.
+        #[arg(long, value_name = "FD")]
+        password_fd: Option<u32>,
     },
     /// Creates, reopens, verifies, and publishes a portable encrypted backup.
     BackupCreate {
@@ -95,6 +103,15 @@ enum Command {
         #[arg(long, value_name = "FD")]
         key_fd: Option<u32>,
     },
+    /// Starts a short-lived, single-use loopback browser restore ceremony.
+    BackupRestoreBrowser {
+        /// Brand-new destination `SQLite` vault path.
+        #[arg(long)]
+        database: PathBuf,
+        /// Brand-new destination root-key path.
+        #[arg(long)]
+        root_key: PathBuf,
+    },
 }
 
 enum SuppliedKey {
@@ -115,11 +132,12 @@ impl SuppliedKey {
     clippy::too_many_lines,
     reason = "the closed administrative command dispatch remains explicit and auditable"
 )]
-fn main() -> Result<(), Box<dyn Error>> {
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn Error>> {
     match Cli::parse().command {
         Command::Diagnostics => {
             println!("smcv_version={}", BuildInfo::current().version);
-            println!("implementation_phase=4");
+            println!("implementation_phase=5");
             println!("production_ready=false");
         }
         Command::Init { database, root_key } => {
@@ -128,32 +146,37 @@ fn main() -> Result<(), Box<dyn Error>> {
             println!("installation_id={}", vault.installation_id);
             println!("status=ready");
         }
-        Command::EnrollOwner { database, root_key } => {
-            let first = rpassword::prompt_password("Owner password: ")?;
-            let second = rpassword::prompt_password("Confirm owner password: ")?;
-            if first != second {
-                return Err("password confirmation did not match".into());
-            }
+        Command::EnrollOwner {
+            database,
+            root_key,
+            password_fd,
+        } => {
+            let first =
+                obtain_owner_password(password_fd, "Owner password: ", "Confirm owner password: ")?;
             let vault = initialize_vault(&database, &root_key, now_unix_ms())?;
             let principal = vault.enroll_local_owner(
                 LocalSetupCapability::for_local_cli(),
-                &ProtectedString::new(first),
+                &ProtectedString::new(first.to_string()),
                 RequestId::random(),
                 now_unix_ms(),
             )?;
             println!("owner_principal_id={principal}");
             println!("status=enrolled");
         }
-        Command::RecoverOwner { database, root_key } => {
-            let first = rpassword::prompt_password("New owner recovery password: ")?;
-            let second = rpassword::prompt_password("Confirm recovery password: ")?;
-            if first != second {
-                return Err("password confirmation did not match".into());
-            }
+        Command::RecoverOwner {
+            database,
+            root_key,
+            password_fd,
+        } => {
+            let first = obtain_owner_password(
+                password_fd,
+                "New owner recovery password: ",
+                "Confirm recovery password: ",
+            )?;
             let vault = initialize_vault(&database, &root_key, now_unix_ms())?;
             let principal = vault.recover_local_owner(
                 LocalSetupCapability::for_local_cli(),
-                &ProtectedString::new(first),
+                &ProtectedString::new(first.to_string()),
                 RequestId::random(),
                 now_unix_ms(),
             )?;
@@ -245,6 +268,9 @@ fn main() -> Result<(), Box<dyn Error>> {
                 "warning=decommission the source installation or rotate credentials as appropriate"
             );
         }
+        Command::BackupRestoreBrowser { database, root_key } => {
+            recovery_web::run(database, root_key).await?;
+        }
     }
     Ok(())
 }
@@ -254,6 +280,24 @@ fn prompt_confirmed_passphrase() -> Result<Zeroizing<String>, Box<dyn Error>> {
     let second = Zeroizing::new(rpassword::prompt_password("Confirm backup passphrase: ")?);
     if first.as_str() != second.as_str() || first.len() < 16 {
         return Err("passphrase confirmation or minimum length failed".into());
+    }
+    Ok(first)
+}
+
+fn obtain_owner_password(
+    descriptor: Option<u32>,
+    first_prompt: &str,
+    confirmation_prompt: &str,
+) -> Result<Zeroizing<String>, Box<dyn Error>> {
+    if let Some(descriptor) = descriptor {
+        return Ok(Zeroizing::new(
+            read_key_fd(descriptor)?.trim_end().to_owned(),
+        ));
+    }
+    let first = Zeroizing::new(rpassword::prompt_password(first_prompt)?);
+    let second = Zeroizing::new(rpassword::prompt_password(confirmation_prompt)?);
+    if first.as_str() != second.as_str() {
+        return Err("password confirmation did not match".into());
     }
     Ok(first)
 }

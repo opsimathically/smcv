@@ -60,6 +60,18 @@ pub struct ApplicationCredentialSummary {
     pub revision: u64,
 }
 
+/// Owner-visible service identity inventory entry with protected metadata.
+pub struct ServiceIdentitySummary {
+    /// Stable workload identity.
+    pub principal_id: PrincipalId,
+    /// Decrypted owner-facing label and optional description.
+    pub metadata: ServiceIdentityMetadata,
+    /// Durable principal lifecycle state.
+    pub state: String,
+    /// Optimistic principal revision.
+    pub revision: u64,
+}
+
 impl core::fmt::Debug for IssuedApplicationCredential {
     fn fmt(&self, formatter: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         formatter
@@ -206,6 +218,63 @@ impl InitializedVault {
             )
             .map_err(|_| AuthenticationError::Integrity)?;
         decode_service_metadata(&plaintext)
+    }
+
+    /// Lists a bounded stable page of protected service-identity metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns rejected for stale owner authority, invalid bounds, or any
+    /// principal/envelope integrity failure.
+    pub fn service_identities(
+        &self,
+        owner: AuthenticatedOwner,
+        after_principal_id: Option<PrincipalId>,
+        limit: u16,
+        request_id: RequestId,
+        now_unix_ms: i64,
+    ) -> Result<Vec<ServiceIdentitySummary>, AuthenticationError> {
+        if !(1..=100).contains(&limit) {
+            return Err(AuthenticationError::InvalidInput);
+        }
+        let _gate = self
+            .authorization_gate
+            .read()
+            .map_err(|_| AuthenticationError::Unavailable)?;
+        crate::authentication::verify_owner_context_active(self, owner, now_unix_ms)?;
+        self.authorize(
+            RequestPrincipal::Owner(owner),
+            Action::IdentityRead,
+            ResourceKind::Namespace,
+            ObjectId::from_uuid(self.vault_id.as_uuid()),
+            request_id,
+            now_unix_ms,
+        )
+        .map_err(map_authorization)?;
+        let records = self
+            .store
+            .service_identities_after(after_principal_id, limit)
+            .map_err(map_storage)?;
+        let mut summaries = Vec::with_capacity(records.len());
+        for record in records {
+            verify_principal_commitment(self, &record.principal)?;
+            let plaintext = self
+                .decrypt_record(
+                    &record.metadata,
+                    ObjectKind::ServiceIdentityMetadata,
+                    ObjectKind::WrappedServiceIdentityMetadataKey,
+                    ObjectId::from_uuid(record.principal.principal_id.as_uuid()),
+                    record.metadata_version,
+                )
+                .map_err(|_| AuthenticationError::Integrity)?;
+            summaries.push(ServiceIdentitySummary {
+                principal_id: record.principal.principal_id,
+                metadata: decode_service_metadata(&plaintext)?,
+                state: record.principal.state,
+                revision: record.principal.revision,
+            });
+        }
+        Ok(summaries)
     }
 
     /// Issues a random display-once application credential after recent auth.
@@ -764,6 +833,12 @@ mod tests {
                 1_800_000_004_000,
             )
             .unwrap_or_else(|error| panic!("synthetic service must create: {error}"));
+        let inventory = vault
+            .service_identities(owner, None, 100, RequestId::random(), 1_800_000_003_500)
+            .unwrap_or_else(|error| panic!("service inventory must read: {error}"));
+        assert_eq!(inventory.len(), 1);
+        assert_eq!(inventory[0].principal_id, service_id);
+        assert_eq!(inventory[0].metadata.label.expose(), "synthetic workload");
         let owner = vault
             .authenticate_browser_session(
                 &session.session_token,

@@ -33,16 +33,17 @@ use tokio::sync::Semaphore;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::{
     request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
-    timeout::TimeoutLayer,
     trace::TraceLayer,
 };
 use uuid::Uuid;
 use webauthn_rs::prelude::{PublicKeyCredential, RegisterPublicKeyCredential};
 
 mod backup_jobs;
+mod web;
 
 const SESSION_COOKIE: &str = "__Host-smcv_session";
 const REQUEST_BODY_LIMIT: usize = 1024 * 1024;
+const ARCHIVE_UPLOAD_BODY_LIMIT: usize = 8 * 1024 * 1024 * 1024;
 const LOGIN_WINDOW_MS: i64 = 60_000;
 const LOGIN_ATTEMPTS_PER_WINDOW: u16 = 10;
 const BEARER_ATTEMPTS_PER_WINDOW: u16 = 120;
@@ -153,6 +154,10 @@ impl ApiState {
 pub fn router(state: ApiState) -> Router {
     let request_id_header = axum::http::HeaderName::from_static("x-request-id");
     Router::new()
+        .route("/", get(web::index))
+        .route("/assets/styles.css", get(web::styles))
+        .route("/assets/app.js", get(web::app))
+        .route("/assets/api.js", get(web::api))
         .route("/health/live", get(live))
         .route("/health/ready", get(ready))
         .route("/api/v1/session/password", post(password_login))
@@ -195,7 +200,13 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/api/v1/secrets/{id}/archive", post(archive_secret))
         .route("/api/v1/secrets/{id}/restore", post(restore_secret))
-        .route("/api/v1/service-identities", post(create_service_identity))
+        .route("/api/v1/secrets/lifecycle", get(list_secret_lifecycle))
+        .route("/api/v1/secrets/{id}/delete", post(delete_secret))
+        .route("/api/v1/secrets/{id}/purge", post(purge_secret))
+        .route(
+            "/api/v1/service-identities",
+            get(list_service_identities).post(create_service_identity),
+        )
         .route(
             "/api/v1/service-identities/{id}",
             get(read_service_identity),
@@ -212,13 +223,17 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/service-identities/{id}/credentials/{credential_id}/revoke",
             post(revoke_credential),
         )
-        .route("/api/v1/policies", post(create_policy))
+        .route("/api/v1/policies", get(list_policies).post(create_policy))
         .route("/api/v1/policies/{id}", get(read_policy))
+        .route("/api/v1/policies/{id}/rules", get(policy_rules))
         .route("/api/v1/policies/{id}/archive", post(archive_policy))
         .route("/api/v1/policies/{id}/grants", post(add_grant))
         .route("/api/v1/policies/{id}/bindings", post(bind_policy))
         .route("/api/v1/audit-events", get(audit_events))
-        .route("/api/v1/backups", post(backup_jobs::create_backup))
+        .route(
+            "/api/v1/backups",
+            get(backup_jobs::list_backups).post(backup_jobs::create_backup),
+        )
         .route(
             "/api/v1/backups/{id}",
             get(backup_jobs::backup_status).delete(backup_jobs::delete_backup),
@@ -227,13 +242,15 @@ pub fn router(state: ApiState) -> Router {
             "/api/v1/backups/{id}/download",
             get(backup_jobs::download_backup),
         )
+        .route(
+            "/api/v1/backup-verifications",
+            post(backup_jobs::verify_uploaded_backup)
+                .layer(DefaultBodyLimit::max(ARCHIVE_UPLOAD_BODY_LIMIT)),
+        )
         .route("/api/v1/openapi.json", get(openapi))
         .fallback(not_found)
         .layer(DefaultBodyLimit::max(REQUEST_BODY_LIMIT))
-        .layer(TimeoutLayer::with_status_code(
-            StatusCode::REQUEST_TIMEOUT,
-            Duration::from_secs(15),
-        ))
+        .layer(middleware::from_fn(enforce_request_timeout))
         .layer(ConcurrencyLimitLayer::new(128))
         .layer(middleware::from_fn(enforce_header_limits))
         .layer(middleware::from_fn_with_state(
@@ -256,6 +273,18 @@ pub fn router(state: ApiState) -> Router {
         )
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
         .with_state(state)
+}
+
+async fn enforce_request_timeout(request: Request<axum::body::Body>, next: Next) -> Response {
+    let duration = if request.uri().path() == "/api/v1/backup-verifications" {
+        Duration::from_secs(15 * 60)
+    } else {
+        Duration::from_secs(15)
+    };
+    match tokio::time::timeout(duration, next.run(request)).await {
+        Ok(response) => response,
+        Err(_) => StatusCode::REQUEST_TIMEOUT.into_response(),
+    }
 }
 
 async fn enforce_bearer_rate_limit(
@@ -737,6 +766,8 @@ struct SecretListEntryResponse {
     metadata: MetadataResponse,
     current_version: u64,
     revision: u64,
+    lifecycle_state: String,
+    deleted_at_unix_ms: Option<i64>,
 }
 
 #[derive(Serialize)]
@@ -779,6 +810,60 @@ async fn list_secrets(
                 metadata: metadata_response(&record.metadata),
                 current_version: record.current_version,
                 revision: record.revision,
+                lifecycle_state: record.lifecycle_state,
+                deleted_at_unix_ms: record.deleted_at_unix_ms,
+            })
+            .collect(),
+        next_after,
+    }))
+}
+
+#[derive(Deserialize)]
+struct SecretLifecyclePageQuery {
+    namespace_id: String,
+    state: String,
+    after: Option<String>,
+    #[serde(default = "default_page_size")]
+    limit: u16,
+}
+
+async fn list_secret_lifecycle(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<SecretLifecyclePageQuery>,
+) -> Result<Json<SecretPageResponse>, ApiError> {
+    let request_id = request_id(&headers);
+    let now = now_unix_ms();
+    let principal = authenticate_principal(&state, &headers, false, now)?;
+    let records = state
+        .vault
+        .authorized(principal, request_id, now)
+        .map_err(|_| ApiError::authentication(request_id))?
+        .list_secrets_in_lifecycle(
+            namespace_id(&query.namespace_id).map_err(|()| ApiError::invalid(request_id))?,
+            &query.state,
+            query
+                .after
+                .as_deref()
+                .map(secret_id)
+                .transpose()
+                .map_err(|()| ApiError::invalid(request_id))?,
+            query.limit,
+        )
+        .map_err(|error| map_vault_error(error, request_id))?;
+    let next_after = (records.len() == usize::from(query.limit))
+        .then(|| records.last().map(|record| record.secret_id.to_string()))
+        .flatten();
+    Ok(Json(SecretPageResponse {
+        secrets: records
+            .into_iter()
+            .map(|record| SecretListEntryResponse {
+                id: record.secret_id.to_string(),
+                metadata: metadata_response(&record.metadata),
+                current_version: record.current_version,
+                revision: record.revision,
+                lifecycle_state: record.lifecycle_state,
+                deleted_at_unix_ms: record.deleted_at_unix_ms,
             })
             .collect(),
         next_after,
@@ -921,6 +1006,55 @@ async fn restore_secret(
         )
         .map_err(|error| map_vault_error(error, request_id))?;
     Ok(Json(RevisionResponse { revision }))
+}
+
+async fn delete_secret(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<LifecycleRequest>,
+) -> Result<Json<RevisionResponse>, ApiError> {
+    let now = now_unix_ms();
+    let request_id = request_id(&headers);
+    let principal = authenticate_principal(&state, &headers, true, now)?;
+    let revision = state
+        .vault
+        .authorized(principal, request_id, now)
+        .map_err(|_| ApiError::authentication(request_id))?
+        .delete_secret(
+            secret_id(&id).map_err(|()| ApiError::not_found(request_id))?,
+            input.expected_revision,
+        )
+        .map_err(|error| map_vault_error(error, request_id))?;
+    Ok(Json(RevisionResponse { revision }))
+}
+
+#[derive(Deserialize)]
+struct PurgeSecretRequest {
+    expected_revision: u64,
+    retention_cutoff_unix_ms: i64,
+}
+
+async fn purge_secret(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+    Json(input): Json<PurgeSecretRequest>,
+) -> Result<StatusCode, ApiError> {
+    let now = now_unix_ms();
+    let request_id = request_id(&headers);
+    let principal = authenticate_principal(&state, &headers, true, now)?;
+    state
+        .vault
+        .authorized(principal, request_id, now)
+        .map_err(|_| ApiError::authentication(request_id))?
+        .purge_secret(
+            secret_id(&id).map_err(|()| ApiError::not_found(request_id))?,
+            input.expected_revision,
+            input.retention_cutoff_unix_ms,
+        )
+        .map_err(|error| map_vault_error(error, request_id))?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 #[derive(Serialize)]
@@ -1087,6 +1221,73 @@ async fn reveal_secret_version(
 struct CreateServiceIdentityRequest {
     label: String,
     description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct ServiceIdentityPageQuery {
+    after: Option<String>,
+    #[serde(default = "default_page_size")]
+    limit: u16,
+}
+
+#[derive(Serialize)]
+struct ServiceIdentityListEntryResponse {
+    id: String,
+    label: String,
+    description: Option<String>,
+    state: String,
+    revision: u64,
+}
+
+#[derive(Serialize)]
+struct ServiceIdentityPageResponse {
+    applications: Vec<ServiceIdentityListEntryResponse>,
+    next_after: Option<String>,
+}
+
+async fn list_service_identities(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<ServiceIdentityPageQuery>,
+) -> Result<Json<ServiceIdentityPageResponse>, ApiError> {
+    let now = now_unix_ms();
+    let request_id = request_id(&headers);
+    let owner = authenticate_owner(&state, &headers, false, now)?;
+    let records = state
+        .vault
+        .service_identities(
+            owner,
+            query
+                .after
+                .as_deref()
+                .map(principal_id)
+                .transpose()
+                .map_err(|()| ApiError::invalid(request_id))?,
+            query.limit,
+            request_id,
+            now,
+        )
+        .map_err(|_| ApiError::not_found(request_id))?;
+    let next_after = (records.len() == usize::from(query.limit))
+        .then(|| records.last().map(|record| record.principal_id.to_string()))
+        .flatten();
+    Ok(Json(ServiceIdentityPageResponse {
+        applications: records
+            .into_iter()
+            .map(|record| ServiceIdentityListEntryResponse {
+                id: record.principal_id.to_string(),
+                label: String::from(record.metadata.label.expose()),
+                description: record
+                    .metadata
+                    .description
+                    .as_ref()
+                    .map(|value| String::from(value.expose())),
+                state: record.state,
+                revision: record.revision,
+            })
+            .collect(),
+        next_after,
+    }))
 }
 
 async fn create_service_identity(
@@ -1336,6 +1537,59 @@ struct CreatePolicyRequest {
     label: String,
 }
 
+#[derive(Deserialize)]
+struct PolicyPageQuery {
+    after: Option<String>,
+    #[serde(default = "default_page_size")]
+    limit: u16,
+}
+
+#[derive(Serialize)]
+struct PolicyPageResponse {
+    policies: Vec<PolicyResponse>,
+    next_after: Option<String>,
+}
+
+async fn list_policies(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<PolicyPageQuery>,
+) -> Result<Json<PolicyPageResponse>, ApiError> {
+    let now = now_unix_ms();
+    let request_id = request_id(&headers);
+    let owner = authenticate_owner(&state, &headers, false, now)?;
+    let records = state
+        .vault
+        .policies(
+            owner,
+            query
+                .after
+                .as_deref()
+                .map(policy_id)
+                .transpose()
+                .map_err(|()| ApiError::invalid(request_id))?,
+            query.limit,
+            request_id,
+            now,
+        )
+        .map_err(|_| ApiError::not_found(request_id))?;
+    let next_after = (records.len() == usize::from(query.limit))
+        .then(|| records.last().map(|record| record.policy_id.to_string()))
+        .flatten();
+    Ok(Json(PolicyPageResponse {
+        policies: records
+            .into_iter()
+            .map(|record| PolicyResponse {
+                id: record.policy_id.to_string(),
+                label: String::from(record.label.expose()),
+                state: record.state,
+                revision: record.revision,
+            })
+            .collect(),
+        next_after,
+    }))
+}
+
 async fn create_policy(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -1364,6 +1618,60 @@ struct PolicyResponse {
     label: String,
     state: String,
     revision: u64,
+}
+
+#[derive(Serialize)]
+struct PolicyGrantResponse {
+    id: String,
+    action: &'static str,
+    resource_kind: &'static str,
+    resource_id: String,
+    include_descendants: bool,
+}
+
+#[derive(Serialize)]
+struct PolicyRulesResponse {
+    authorization_revision: u64,
+    grants: Vec<PolicyGrantResponse>,
+    bound_service_principal_ids: Vec<String>,
+}
+
+async fn policy_rules(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    AxumPath(id): AxumPath<String>,
+) -> Result<Json<PolicyRulesResponse>, ApiError> {
+    let now = now_unix_ms();
+    let request_id = request_id(&headers);
+    let owner = authenticate_owner(&state, &headers, false, now)?;
+    let rules = state
+        .vault
+        .policy_rules(
+            owner,
+            policy_id(&id).map_err(|()| ApiError::not_found(request_id))?,
+            request_id,
+            now,
+        )
+        .map_err(|_| ApiError::not_found(request_id))?;
+    Ok(Json(PolicyRulesResponse {
+        authorization_revision: rules.authorization_revision,
+        grants: rules
+            .grants
+            .into_iter()
+            .map(|grant| PolicyGrantResponse {
+                id: grant.grant_id.to_string(),
+                action: grant.action.as_str(),
+                resource_kind: grant.resource_kind.as_str(),
+                resource_id: grant.resource_id.to_string(),
+                include_descendants: grant.include_descendants,
+            })
+            .collect(),
+        bound_service_principal_ids: rules
+            .bindings
+            .into_iter()
+            .map(|binding| binding.principal_id.to_string())
+            .collect(),
+    }))
 }
 
 async fn read_policy(
@@ -1590,26 +1898,31 @@ fn openapi_document() -> serde_json::Value {
             "/namespaces/{id}/move-impact": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "previewNamespaceMove", "summary": "Preview exact access broadening", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"200": {"description": "Service/action access delta"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/namespaces/{id}/move": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "moveNamespace", "summary": "Move namespace with confirmed access delta", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"200": {"description": "New revision"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/secrets": {"get": {"operationId": "listSecrets", "summary": "List protected secret metadata", "parameters": [{"$ref": "#/components/parameters/NamespaceIdQuery"}, {"$ref": "#/components/parameters/ObjectAfter"}, {"$ref": "#/components/parameters/Limit"}], "responses": {"200": {"description": "Bounded metadata-only secret page"}, "default": {"$ref": "#/components/responses/Error"}}}, "post": {"operationId": "createSecret", "summary": "Create encrypted secret", "parameters": [{"$ref": "#/components/parameters/IdempotencyKey"}], "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"201": {"description": "Secret identifier and version preconditions"}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/secrets/lifecycle": {"get": {"operationId": "listSecretLifecycle", "summary": "List owner-visible secrets in one lifecycle state", "parameters": [{"$ref": "#/components/parameters/NamespaceIdQuery"}, {"name": "state", "in": "query", "required": true, "schema": {"type": "string", "enum": ["active", "archived", "deleted"]}}, {"$ref": "#/components/parameters/ObjectAfter"}, {"$ref": "#/components/parameters/Limit"}], "responses": {"200": {"description": "Bounded lifecycle inventory without values"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/secrets/{id}": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "readSecretMetadata", "summary": "Read protected metadata", "responses": {"200": {"description": "Decrypted metadata"}, "default": {"$ref": "#/components/responses/Error"}}}, "put": {"operationId": "updateSecret", "summary": "Append immutable secret version", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"200": {"description": "New immutable version"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/secrets/{id}/value": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "revealCurrentSecret", "summary": "Explicitly reveal current value", "responses": {"200": {"$ref": "#/components/responses/SecretValue"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/secrets/{id}/versions": {"parameters": [{"$ref": "#/components/parameters/Id"}, {"$ref": "#/components/parameters/After"}, {"$ref": "#/components/parameters/Limit"}], "get": {"operationId": "listSecretVersions", "summary": "List immutable version metadata", "responses": {"200": {"description": "Bounded version page"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/secrets/{id}/versions/{version}/value": {"parameters": [{"$ref": "#/components/parameters/Id"}, {"$ref": "#/components/parameters/Version"}], "get": {"operationId": "revealSecretVersion", "summary": "Explicitly reveal historical value", "responses": {"200": {"$ref": "#/components/responses/SecretValue"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/secrets/{id}/archive": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "archiveSecret", "summary": "Archive secret", "requestBody": {"$ref": "#/components/requestBodies/Lifecycle"}, "responses": {"200": {"description": "New revision"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/secrets/{id}/restore": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "restoreSecret", "summary": "Restore archived secret", "requestBody": {"$ref": "#/components/requestBodies/Lifecycle"}, "responses": {"200": {"description": "New revision"}, "default": {"$ref": "#/components/responses/Error"}}}},
-            "/service-identities": {"post": {"operationId": "createServiceIdentity", "summary": "Create service identity", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"201": {"$ref": "#/components/responses/Id"}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/secrets/{id}/delete": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "deleteSecret", "summary": "Owner-tombstone a secret while retaining encrypted history", "requestBody": {"$ref": "#/components/requestBodies/Lifecycle"}, "responses": {"200": {"description": "New revision"}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/secrets/{id}/purge": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "purgeSecret", "summary": "Owner-purge current-vault ciphertext after retention approval", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"204": {"description": "Current-vault ciphertext purged; tombstone and audit retained"}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/service-identities": {"get": {"operationId": "listServiceIdentities", "summary": "List protected service-identity metadata", "responses": {"200": {"description": "Bounded application identity page"}, "default": {"$ref": "#/components/responses/Error"}}}, "post": {"operationId": "createServiceIdentity", "summary": "Create service identity", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"201": {"$ref": "#/components/responses/Id"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/service-identities/{id}": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "readServiceIdentity", "summary": "Read service identity", "responses": {"200": {"description": "Protected identity metadata"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/service-identities/{id}/effective-access": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "effectiveAccess", "summary": "Compute current effective access", "responses": {"200": {"description": "Closed effective action set"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/service-identities/{id}/credentials": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "listCredentials", "summary": "List safe credential lifecycle metadata", "parameters": [{"$ref": "#/components/parameters/CredentialAfter"}, {"$ref": "#/components/parameters/Limit"}], "responses": {"200": {"description": "Bounded credential page without bearer values"}, "default": {"$ref": "#/components/responses/Error"}}}, "post": {"operationId": "issueCredential", "summary": "Issue display-once application credential", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"201": {"description": "Display-once credential"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/service-identities/{id}/credentials/{credential_id}/revoke": {"parameters": [{"$ref": "#/components/parameters/Id"}, {"$ref": "#/components/parameters/CredentialId"}], "post": {"operationId": "revokeCredential", "summary": "Revoke application credential", "requestBody": {"$ref": "#/components/requestBodies/Lifecycle"}, "responses": {"200": {"description": "New revision"}, "default": {"$ref": "#/components/responses/Error"}}}},
-            "/policies": {"post": {"operationId": "createPolicy", "summary": "Create allow-only policy", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"201": {"$ref": "#/components/responses/Id"}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/policies": {"get": {"operationId": "listPolicies", "summary": "List protected policy metadata", "responses": {"200": {"description": "Bounded policy page"}, "default": {"$ref": "#/components/responses/Error"}}}, "post": {"operationId": "createPolicy", "summary": "Create allow-only policy", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"201": {"$ref": "#/components/responses/Id"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/policies/{id}": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "readPolicy", "summary": "Read policy", "responses": {"200": {"description": "Policy metadata and state"}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/policies/{id}/rules": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "readPolicyRules", "summary": "Read exact policy grants and bindings", "responses": {"200": {"description": "Policy rules and authorization revision"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/policies/{id}/archive": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "archivePolicy", "summary": "Archive policy", "requestBody": {"$ref": "#/components/requestBodies/Lifecycle"}, "responses": {"200": {"description": "New revision"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/policies/{id}/grants": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "addPolicyGrant", "summary": "Add closed allow-only grant", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"201": {"$ref": "#/components/responses/Id"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/policies/{id}/bindings": {"parameters": [{"$ref": "#/components/parameters/Id"}], "post": {"operationId": "bindPolicy", "summary": "Bind policy to service identity", "requestBody": {"$ref": "#/components/requestBodies/JsonObject"}, "responses": {"204": {"description": "Policy bound"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/audit-events": {"get": {"operationId": "auditEvents", "summary": "Read bounded audit page", "parameters": [{"$ref": "#/components/parameters/AuditAfter"}, {"$ref": "#/components/parameters/AuditLimit"}], "responses": {"200": {"description": "Authenticated audit records"}, "default": {"$ref": "#/components/responses/Error"}}}},
-            "/backups": {"post": {"operationId": "createBackupJob", "summary": "Start a durable portable-backup job", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BackupCreate"}}}}, "responses": {"202": {"description": "Opaque job and optional display-once recovery key"}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/backups": {"get": {"operationId": "listBackupJobs", "summary": "List safe durable backup job status", "responses": {"200": {"description": "Unexpired backup jobs without recovery material"}, "default": {"$ref": "#/components/responses/Error"}}}, "post": {"operationId": "createBackupJob", "summary": "Start a durable portable-backup job", "requestBody": {"required": true, "content": {"application/json": {"schema": {"$ref": "#/components/schemas/BackupCreate"}}}}, "responses": {"202": {"description": "Opaque job and optional display-once recovery key"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/backups/{id}": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "backupJobStatus", "summary": "Read safe durable backup status", "responses": {"200": {"description": "Safe job status without key material"}, "default": {"$ref": "#/components/responses/Error"}}}, "delete": {"operationId": "deleteBackupArtifact", "summary": "Delete an encrypted server artifact and status", "responses": {"204": {"description": "Artifact removed"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/backups/{id}/download": {"parameters": [{"$ref": "#/components/parameters/Id"}], "get": {"operationId": "downloadBackupArtifact", "summary": "Download a verified encrypted archive", "responses": {"200": {"description": "Portable .smcvault stream", "content": {"application/octet-stream": {}}}, "default": {"$ref": "#/components/responses/Error"}}}},
+            "/backup-verifications": {"post": {"operationId": "verifyUploadedBackup", "summary": "Fully verify and clean-restore-test an uploaded portable archive", "requestBody": {"required": true, "content": {"multipart/form-data": {"schema": {"type": "object", "required": ["key_mode", "key", "archive"], "properties": {"key_mode": {"type": "string", "enum": ["generated_recovery", "recovery_key", "passphrase"]}, "key": {"type": "string", "format": "password", "writeOnly": true}, "archive": {"type": "string", "format": "binary"}}}}}}, "responses": {"200": {"description": "Authenticated metadata and successful clean restore drill"}, "default": {"$ref": "#/components/responses/Error"}}}},
             "/openapi.json": {"get": {"operationId": "openApiDocument", "summary": "Read this API contract", "security": [], "responses": {"200": {"description": "OpenAPI 3.1 document"}}}}
         },
         "components": {
@@ -1759,10 +2072,12 @@ fn apply_security_headers(headers: &mut HeaderMap) {
         "x-content-type-options",
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(
-        "content-security-policy",
-        HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; base-uri 'none'"),
-    );
+    if !headers.contains_key(header::CONTENT_SECURITY_POLICY) {
+        headers.insert(
+            header::CONTENT_SECURITY_POLICY,
+            HeaderValue::from_static("default-src 'none'; frame-ancestors 'none'; base-uri 'none'"),
+        );
+    }
     headers.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
 }
 
@@ -1945,6 +2260,74 @@ mod tests {
         )
         .unwrap_or_else(|error| panic!("synthetic API state must open: {error}"));
         (root, state)
+    }
+
+    async fn login_owner(state: &ApiState) -> (String, String) {
+        let login = Request::builder()
+            .method("POST")
+            .uri("/api/v1/session/password")
+            .header("content-type", "application/json")
+            .body(Body::from(r#"{"password":"synthetic long password"}"#))
+            .unwrap_or_else(|error| panic!("login request must build: {error}"));
+        let login = router(state.clone())
+            .oneshot(login)
+            .await
+            .unwrap_or_else(|error| panic!("login must respond: {error}"));
+        let cookie = login
+            .headers()
+            .get("set-cookie")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(';').next())
+            .map_or_else(|| panic!("session cookie must exist"), str::to_owned);
+        let login_body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(login.into_body(), 16 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("login body must read: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("login body must parse: {error}"));
+        let csrf = login_body["csrf_token"]
+            .as_str()
+            .map_or_else(|| panic!("CSRF token must exist"), str::to_owned);
+        (cookie, csrf)
+    }
+
+    #[tokio::test]
+    async fn same_origin_web_shell_has_distinct_strict_document_policy() {
+        let (_root, state) = state();
+        let response = router(state)
+            .oneshot(
+                Request::builder()
+                    .uri("/")
+                    .body(Body::empty())
+                    .unwrap_or_else(|error| panic!("web request must build: {error}")),
+            )
+            .await
+            .unwrap_or_else(|error| panic!("web request must respond: {error}"));
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|value| value.to_str().ok()),
+            Some("text/html; charset=utf-8")
+        );
+        let policy = response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_else(|| panic!("document CSP must exist"));
+        assert!(policy.contains("script-src 'self'"));
+        assert!(policy.contains("connect-src 'self'"));
+        assert!(policy.contains("frame-ancestors 'none'"));
+        let body = to_bytes(response.into_body(), 128 * 1024)
+            .await
+            .unwrap_or_else(|error| panic!("web body must read: {error}"));
+        let text = std::str::from_utf8(&body)
+            .unwrap_or_else(|error| panic!("web body must be UTF-8: {error}"));
+        assert!(text.contains("id=\"skip-link\""));
+        assert!(text.contains("Skip to authentication"));
+        assert!(text.contains("id=\"main-content\""));
+        assert!(text.contains("autocomplete=\"current-password\""));
     }
 
     #[tokio::test]
@@ -2162,13 +2545,16 @@ mod tests {
             ("/namespaces/{id}/move-impact", &["post"][..]),
             ("/namespaces/{id}/move", &["post"][..]),
             ("/secrets", &["get", "post"][..]),
+            ("/secrets/lifecycle", &["get"][..]),
             ("/secrets/{id}", &["get", "put"][..]),
             ("/secrets/{id}/value", &["get"][..]),
             ("/secrets/{id}/versions", &["get"][..]),
             ("/secrets/{id}/versions/{version}/value", &["get"][..]),
             ("/secrets/{id}/archive", &["post"][..]),
             ("/secrets/{id}/restore", &["post"][..]),
-            ("/service-identities", &["post"][..]),
+            ("/secrets/{id}/delete", &["post"][..]),
+            ("/secrets/{id}/purge", &["post"][..]),
+            ("/service-identities", &["get", "post"][..]),
             ("/service-identities/{id}", &["get"][..]),
             ("/service-identities/{id}/effective-access", &["get"][..]),
             ("/service-identities/{id}/credentials", &["get", "post"][..]),
@@ -2176,15 +2562,17 @@ mod tests {
                 "/service-identities/{id}/credentials/{credential_id}/revoke",
                 &["post"][..],
             ),
-            ("/policies", &["post"][..]),
+            ("/policies", &["get", "post"][..]),
             ("/policies/{id}", &["get"][..]),
+            ("/policies/{id}/rules", &["get"][..]),
             ("/policies/{id}/archive", &["post"][..]),
             ("/policies/{id}/grants", &["post"][..]),
             ("/policies/{id}/bindings", &["post"][..]),
             ("/audit-events", &["get"][..]),
-            ("/backups", &["post"][..]),
+            ("/backups", &["get", "post"][..]),
             ("/backups/{id}", &["delete", "get"][..]),
             ("/backups/{id}/download", &["get"][..]),
+            ("/backup-verifications", &["post"][..]),
             ("/openapi.json", &["get"][..]),
         ]);
         let paths = document["paths"]
@@ -2207,6 +2595,162 @@ mod tests {
                 assert!(operation_ids.insert(operation_id));
             }
         }
+    }
+
+    #[tokio::test]
+    #[allow(
+        clippy::too_many_lines,
+        reason = "the HTTP lifecycle proof keeps archive inventory, restore, tombstone inventory, and purge in one ordered scenario"
+    )]
+    async fn owner_can_administer_distinct_secret_lifecycle_inventories() {
+        let (_root, state) = state();
+        enroll_local_owner(
+            &state,
+            ProtectedString::new(String::from("synthetic long password")),
+        )
+        .unwrap_or_else(|error| panic!("synthetic owner must enroll: {error}"));
+        let (cookie, csrf) = login_owner(&state).await;
+        let namespace_request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/namespaces")
+            .header("content-type", "application/json")
+            .header("cookie", &cookie)
+            .header("x-smcv-csrf", &csrf)
+            .header("idempotency-key", "synthetic-lifecycle-namespace")
+            .body(Body::from(r#"{"parent_namespace_id":null,"metadata":{"name":"synthetic lifecycle namespace","description":null,"username":null,"tags":[]}}"#))
+            .unwrap_or_else(|error| panic!("namespace request must build: {error}"));
+        let namespace_response = router(state.clone())
+            .oneshot(namespace_request)
+            .await
+            .unwrap_or_else(|error| panic!("namespace must respond: {error}"));
+        assert_eq!(namespace_response.status(), StatusCode::CREATED);
+        let namespace_body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(namespace_response.into_body(), 16 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("namespace body must read: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("namespace body must parse: {error}"));
+        let namespace = namespace_body["id"]
+            .as_str()
+            .map_or_else(|| panic!("namespace id must exist"), str::to_owned);
+        let secret_request = Request::builder()
+            .method("POST")
+            .uri("/api/v1/secrets")
+            .header("content-type", "application/json")
+            .header("cookie", &cookie)
+            .header("x-smcv-csrf", &csrf)
+            .header("idempotency-key", "synthetic-lifecycle-secret")
+            .body(Body::from(format!(r#"{{"namespace_id":"{namespace}","metadata":{{"name":"synthetic lifecycle secret","description":null,"username":null,"tags":[]}},"value_base64":"dmFsdWU=","expires_at_unix_ms":null,"rotation_due_at_unix_ms":null}}"#)))
+            .unwrap_or_else(|error| panic!("secret request must build: {error}"));
+        let secret_response = router(state.clone())
+            .oneshot(secret_request)
+            .await
+            .unwrap_or_else(|error| panic!("secret must respond: {error}"));
+        assert_eq!(secret_response.status(), StatusCode::CREATED);
+        let secret_body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(secret_response.into_body(), 16 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("secret body must read: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("secret body must parse: {error}"));
+        let secret = secret_body["id"]
+            .as_str()
+            .map_or_else(|| panic!("secret id must exist"), str::to_owned);
+
+        let mutation = |path: String, body: String| {
+            Request::builder()
+                .method("POST")
+                .uri(path)
+                .header("content-type", "application/json")
+                .header("cookie", &cookie)
+                .header("x-smcv-csrf", &csrf)
+                .body(Body::from(body))
+                .unwrap_or_else(|error| panic!("lifecycle request must build: {error}"))
+        };
+        let archive = router(state.clone())
+            .oneshot(mutation(
+                format!("/api/v1/secrets/{secret}/archive"),
+                r#"{"expected_revision":1}"#.to_owned(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("archive must respond: {error}"));
+        assert_eq!(archive.status(), StatusCode::OK);
+
+        let archived = Request::builder()
+            .uri(format!(
+                "/api/v1/secrets/lifecycle?namespace_id={namespace}&state=archived&limit=10"
+            ))
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap_or_else(|error| panic!("inventory request must build: {error}"));
+        let archived = router(state.clone())
+            .oneshot(archived)
+            .await
+            .unwrap_or_else(|error| panic!("inventory must respond: {error}"));
+        let archived_body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(archived.into_body(), 64 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("inventory body must read: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("inventory body must parse: {error}"));
+        assert_eq!(archived_body["secrets"][0]["lifecycle_state"], "archived");
+
+        let restore = router(state.clone())
+            .oneshot(mutation(
+                format!("/api/v1/secrets/{secret}/restore"),
+                r#"{"expected_revision":2}"#.to_owned(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("restore must respond: {error}"));
+        assert_eq!(restore.status(), StatusCode::OK);
+        let delete = router(state.clone())
+            .oneshot(mutation(
+                format!("/api/v1/secrets/{secret}/delete"),
+                r#"{"expected_revision":3}"#.to_owned(),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("delete must respond: {error}"));
+        assert_eq!(delete.status(), StatusCode::OK);
+
+        let deleted = Request::builder()
+            .uri(format!(
+                "/api/v1/secrets/lifecycle?namespace_id={namespace}&state=deleted&limit=10"
+            ))
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap_or_else(|error| panic!("deleted request must build: {error}"));
+        let deleted = router(state.clone())
+            .oneshot(deleted)
+            .await
+            .unwrap_or_else(|error| panic!("deleted inventory must respond: {error}"));
+        let deleted_body: serde_json::Value = serde_json::from_slice(
+            &to_bytes(deleted.into_body(), 64 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("deleted body must read: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("deleted body must parse: {error}"));
+        assert!(deleted_body["secrets"][0]["deleted_at_unix_ms"].is_number());
+
+        let purge = router(state.clone())
+            .oneshot(mutation(
+                format!("/api/v1/secrets/{secret}/purge"),
+                format!(
+                    r#"{{"expected_revision":4,"retention_cutoff_unix_ms":{}}}"#,
+                    i64::MAX
+                ),
+            ))
+            .await
+            .unwrap_or_else(|error| panic!("purge must respond: {error}"));
+        assert_eq!(purge.status(), StatusCode::NO_CONTENT);
+        assert!(
+            state
+                .vault
+                .store
+                .secret(
+                    super::secret_id(&secret).unwrap_or_else(|()| panic!("secret id must parse"))
+                )
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -2310,7 +2854,7 @@ mod tests {
             .header("cookie", &cookie)
             .body(Body::empty())
             .unwrap_or_else(|error| panic!("download request must build: {error}"));
-        let download = router(state)
+        let download = router(state.clone())
             .oneshot(download)
             .await
             .unwrap_or_else(|error| panic!("download must respond: {error}"));
@@ -2326,6 +2870,59 @@ mod tests {
             .await
             .unwrap_or_else(|error| panic!("archive download must read: {error}"));
         assert!(archive.starts_with(b"SMCVLT01"));
+
+        let boundary = "smcv-synthetic-verification-boundary";
+        let mut multipart = Vec::new();
+        multipart.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"key_mode\"\r\n\r\ngenerated_recovery\r\n"
+            )
+            .as_bytes(),
+        );
+        multipart.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"key\"\r\n\r\n{recovery_key}\r\n"
+            )
+            .as_bytes(),
+        );
+        multipart.extend_from_slice(
+            format!(
+                "--{boundary}\r\nContent-Disposition: form-data; name=\"archive\"; filename=\"synthetic.smcvault\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            )
+            .as_bytes(),
+        );
+        multipart.extend_from_slice(&archive);
+        multipart.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
+        let verification = Request::builder()
+            .method("POST")
+            .uri("/api/v1/backup-verifications")
+            .header(
+                "content-type",
+                format!("multipart/form-data; boundary={boundary}"),
+            )
+            .header("cookie", &cookie)
+            .header("x-smcv-csrf", csrf)
+            .body(Body::from(multipart))
+            .unwrap_or_else(|error| panic!("verification request must build: {error}"));
+        let verification = router(state)
+            .oneshot(verification)
+            .await
+            .unwrap_or_else(|error| panic!("verification must respond: {error}"));
+        assert_eq!(verification.status(), StatusCode::OK);
+        let report: serde_json::Value = serde_json::from_slice(
+            &to_bytes(verification.into_body(), 64 * 1024)
+                .await
+                .unwrap_or_else(|error| panic!("verification report must read: {error}")),
+        )
+        .unwrap_or_else(|error| panic!("verification report must parse: {error}"));
+        assert_eq!(report["integrity_verified"], true);
+        assert_eq!(report["restore_tested"], true);
+        let leftovers: Vec<_> = fs::read_dir(root.path().join("data/backup-artifacts"))
+            .unwrap_or_else(|error| panic!("artifact directory must read: {error}"))
+            .filter_map(Result::ok)
+            .filter(|entry| entry.file_name().to_string_lossy().starts_with('.'))
+            .collect();
+        assert!(leftovers.is_empty());
     }
 
     #[tokio::test]
