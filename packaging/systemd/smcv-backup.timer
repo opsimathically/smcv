@@ -1,0 +1,11 @@
+[Unit]
+Description=Daily verified SMCV portable backup
+
+[Timer]
+OnCalendar=daily
+Persistent=true
+RandomizedDelaySec=30m
+Unit=smcv-backup.service
+
+[Install]
+WantedBy=timers.target

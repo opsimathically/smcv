@@ -1,0 +1,31 @@
+:root { color-scheme: light dark; font: 100%/1.5 system-ui, sans-serif; --accent: #2259c7; --danger: #a82c35; --border: #768092; --surface: Canvas; }
+* { box-sizing: border-box; }
+body { margin: 0; background: Canvas; color: CanvasText; }
+header { min-height: 4rem; display: flex; gap: 1rem; align-items: center; padding: 1rem max(1rem, calc((100% - 58rem) / 2)); border-bottom: 1px solid var(--border); }
+main { width: min(58rem, 100%); margin: 0 auto; padding: 2rem 1rem 5rem; }
+h1 { line-height: 1.15; }
+.eyebrow { text-transform: uppercase; letter-spacing: .08em; font-size: .8rem; font-weight: 700; }
+.card, .callout { border: 1px solid var(--border); border-radius: .5rem; padding: 1.25rem; margin-block: 1rem; }
+.callout { border-inline-start: .4rem solid #b57800; }
+.stack { display: grid; gap: 1rem; }
+label { display: grid; gap: .35rem; font-weight: 650; }
+input, select, button { font: inherit; min-height: 2.75rem; }
+input, select { width: 100%; padding: .55rem; border: 1px solid var(--border); border-radius: .3rem; background: Field; color: FieldText; }
+input[type="checkbox"] { width: 1.25rem; min-height: 1.25rem; padding: 0; }
+button { border: 0; border-radius: .3rem; padding: .55rem 1rem; font-weight: 700; color: white; background: var(--accent); cursor: pointer; }
+button.danger { background: var(--danger); }
+button:disabled { opacity: .55; cursor: wait; }
+.actions { display: flex; flex-wrap: wrap; gap: .75rem; }
+.muted, .help { color: GrayText; }
+.error { padding: .75rem; border-inline-start: .4rem solid var(--danger); }
+.summary { display: grid; grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); gap: .75rem; }
+.summary div { border: 1px solid var(--border); padding: .75rem; overflow-wrap: anywhere; }
+.summary strong { display: block; }
+.mono { font-family: ui-monospace, monospace; overflow-wrap: anywhere; }
+.skip { position: absolute; inset-inline-start: -10000px; }
+.skip:focus { inset-inline-start: 1rem; inset-block-start: 1rem; z-index: 2; padding: .5rem; background: Canvas; }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
+:focus-visible { outline: .2rem solid #ee8b00; outline-offset: .15rem; }
+@media (max-width: 30rem) { main { padding-block-start: 1rem; } .actions button { width: 100%; } }
+@media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; } }
+@media (forced-colors: active) { .card, .callout, input, select { border-color: CanvasText; } button { border: 1px solid ButtonText; } }
